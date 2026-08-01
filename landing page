@@ -1,0 +1,3394 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot 
+} from 'firebase/firestore';
+import { 
+  User, Shield, FileText, DollarSign, Megaphone, MessageSquare, 
+  Users, CheckCircle, Plus, Trash2, Edit, LogOut, 
+  Home, Printer, Search, Lock, MapPin, Building,
+  ChevronRight, AlertCircle, Check, Eye, EyeOff, Send, FilePlus,
+  Award, ShieldCheck, Image, Camera, Save, X, Calendar, Clock,
+  Bell, Bot, Sparkles, Volume2, VolumeX, Loader2, Wand2
+} from 'lucide-react';
+
+const getFirebaseConfig = () => {
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+    try {
+      return JSON.parse(__firebase_config);
+    } catch (e) {
+      console.error("Failed to parse __firebase_config", e);
+    }
+  }
+  return {
+    apiKey: "demo-api-key",
+    authDomain: "rt003-muktiwari.firebaseapp.com",
+    projectId: "rt003-muktiwari",
+    storageBucket: "rt003-muktiwari.appspot.com",
+    messagingSenderId: "1234567890",
+    appId: "1:1234567890:web:abcdef123456"
+  };
+};
+
+const firebaseConfig = getFirebaseConfig();
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'rt003-rw037-muktiwari';
+
+// Passcode rahasia untuk pendaftaran pengurus RT
+const PENGURUS_PASSCODE = "RT003MUKTI";
+
+function base64ToArrayBuffer(base64) {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function writeString(view, offset, string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
+
+function pcmToWav(pcm16, sampleRate = 24000) {
+  const numChannels = 1;
+  const byteRate = sampleRate * numChannels * 2;
+  const blockAlign = numChannels * 2;
+  const buffer = new ArrayBuffer(44 + pcm16.length * 2);
+  const view = new DataView(buffer);
+
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + pcm16.length * 2, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, pcm16.length * 2, true);
+
+  for (let i = 0; i < pcm16.length; i++) {
+    view.setInt16(44 + i * 2, pcm16[i], true);
+  }
+
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// Helper untuk kompresi & resize gambar agar tidak melebihi batas 1MB Firestore
+const compressImage = (file, maxWidth = 400, maxHeight = 400, quality = 0.75) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new window.Image();
+      img.src = event.target.result;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width = Math.round((width * maxHeight) / height);
+            height = maxHeight;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(dataUrl);
+      };
+      img.onerror = (err) => reject(err);
+    };
+    reader.onerror = (err) => reject(err);
+  });
+};
+
+const callGeminiTextApi = async (prompt, systemInstruction = '') => {
+  const apiKey = "";
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+  
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined
+  };
+
+  let delay = 1000;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
+      }
+    } catch (e) {
+      console.error("Gemini API attempt failed", e);
+    }
+    await new Promise(r => setTimeout(r, delay));
+    delay *= 2;
+  }
+  throw new Error("Gagal menghubungkan ke AI Gemini.");
+};
+
+const callImagenApi = async (prompt) => {
+  const apiKey = "";
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`;
+  const payload = {
+    instances: [{ prompt: `A professional event poster for neighborhood smart village event in Indonesia: ${prompt}` }],
+    parameters: { sampleCount: 1 }
+  };
+
+  let delay = 1000;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.predictions?.[0]?.bytesBase64Encoded) {
+        return `data:image/png;base64,${data.predictions[0].bytesBase64Encoded}`;
+      }
+    } catch (e) {
+      console.error("Imagen API attempt failed", e);
+    }
+    await new Promise(r => setTimeout(r, delay));
+    delay *= 2;
+  }
+  throw new Error("Gagal membuat gambar poster AI.");
+};
+
+const callGeminiTtsApi = async (text) => {
+  const apiKey = "";
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+  const payload = {
+    contents: [{
+      parts: [{ text: `Bacakan pengumuman resmi RT berikut ini secara jelas dan ramah: ${text}` }]
+    }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: "Kore" }
+        }
+      }
+    }
+  };
+
+  let delay = 1000;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      const part = data?.candidates?.[0]?.content?.parts?.[0];
+      const audioData = part?.inlineData?.data;
+      const mimeType = part?.inlineData?.mimeType;
+
+      if (audioData && mimeType) {
+        let sampleRate = 24000;
+        const match = mimeType.match(/rate=(\d+)/);
+        if (match) {
+          sampleRate = parseInt(match[1], 10);
+        }
+        const pcmBuffer = base64ToArrayBuffer(audioData);
+        const pcm16 = new Int16Array(pcmBuffer);
+        const wavBlob = pcmToWav(pcm16, sampleRate);
+        return URL.createObjectURL(wavBlob);
+      }
+    } catch (e) {
+      console.error("TTS API attempt failed", e);
+    }
+    await new Promise(r => setTimeout(r, delay));
+    delay *= 2;
+  }
+  throw new Error("Gagal membuat suara audio AI.");
+};
+
+const LogoGHP = ({ className = "w-16 h-16" }) => (
+  <svg className={className} viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="100" cy="100" r="96" fill="url(#goldGrad)" stroke="#B8860B" strokeWidth="4"/>
+    <circle cx="100" cy="100" r="88" fill="#0b1e36"/>
+    <circle cx="100" cy="100" r="84" stroke="url(#goldGrad)" strokeWidth="2" fill="none"/>
+    <path id="textArcTop" d="M 25 100 A 75 75 0 1 1 175 100" fill="none"/>
+    <path id="textArcBot" d="M 175 100 A 75 75 0 1 1 25 100" fill="none"/>
+    <text textAnchor="middle" fill="#FFD700" fontSize="13" fontWeight="900" letterSpacing="1.5">
+      <textPath href="#textArcTop" startOffset="50%">GHP SMART VILLAGE</textPath>
+    </text>
+    <text textAnchor="middle" fill="#FFFFFF" fontSize="8" fontWeight="bold" letterSpacing="1">
+      <textPath href="#textArcBot" startOffset="50%">BERSAMA BERDAYA UNTUK KITA</textPath>
+    </text>
+    <circle cx="100" cy="105" r="55" fill="#102a45" stroke="#10b981" strokeWidth="2"/>
+    <path d="M100 68 L100 71 M92 73 A 12 12 0 0 1 108 73 M85 79 A 20 20 0 0 1 115 79" stroke="#60a5fa" strokeWidth="2.5" strokeLinecap="round"/>
+    <circle cx="100" cy="68" r="2" fill="#60a5fa"/>
+    <path d="M82 118 L82 100 L100 88 L118 100 L118 118 Z" fill="#1e293b" stroke="#10b981" strokeWidth="2"/>
+    <polygon points="100,85 78,102 122,102" fill="#10b981"/>
+    <rect x="94" y="105" width="12" height="13" fill="#fbbf24" rx="1"/>
+    <rect x="86" y="102" width="5" height="5" fill="#60a5fa"/>
+    <rect x="109" y="102" width="5" height="5" fill="#60a5fa"/>
+    <g transform="translate(118, 98) scale(0.6)">
+      <path d="M12 2 L22 7 V14 C22 20 12 25 12 25 C12 25 2 20 2 14 V7 L12 2 Z" fill="#047857" stroke="#fbbf24" strokeWidth="2"/>
+      <path d="M12 7 V12 M12 16 H12.01" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round"/>
+    </g>
+    <rect x="52" y="132" width="96" height="26" rx="13" fill="#091829" stroke="url(#goldGrad)" strokeWidth="2.5"/>
+    <text x="100" y="150" textAnchor="middle" fill="#FFD700" fontSize="16" fontWeight="900" letterSpacing="2">RT 003</text>
+    <polygon points="100,163 103,169 109,170 105,174 106,180 100,177 94,180 95,174 91,170 97,169" fill="#FFD700"/>
+    <defs>
+      <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stopColor="#FFE259"/>
+        <stop offset="100%" stopColor="#FFA751"/>
+      </linearGradient>
+    </defs>
+  </svg>
+);
+
+export default function App() {
+  const [authUser, setAuthUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showRegisterPassword, setShowRegisterPassword] = useState(false);
+  const [loginForm, setLoginForm] = useState({ identifier: '', password: '' });
+  const [registerForm, setRegisterForm] = useState({
+    fullName: '',
+    nik: '',
+    kkNumber: '',
+    email: '',
+    username: '',
+    password: '',
+    phone: '',
+    blockNumber: '',
+    residentStatus: 'Tetap',
+    role: 'warga',
+    passcode: ''
+  });
+  const [authError, setAuthError] = useState('');
+  const [authSuccess, setAuthSuccess] = useState('');
+
+  // Navigation State
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [showPrintModal, setShowPrintModal] = useState(null);
+  const [showSecurityModal, setShowSecurityModal] = useState(false);
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+
+  // Firestore Realtime Collections State
+  const [usersList, setUsersList] = useState([]);
+  const [announcements, setAnnouncements] = useState([]);
+  const [finances, setFinances] = useState([]);
+  const [letters, setLetters] = useState([]);
+  const [complaints, setComplaints] = useState([]);
+  const [structureList, setStructureList] = useState([]);
+  const [eventsList, setEventsList] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [showNotifDropdown, setShowNotifDropdown] = useState(false);
+
+  // AI State Variables
+  const [aiChatMessages, setAiChatMessages] = useState([
+    {
+      sender: 'ai',
+      text: 'Halo Warga RT 003 Muktiwari! 👋 Saya Asisten AI RT. Ada yang bisa saya bantu terkait syarat surat, iuran kas, kegiatan warga, atau aturan lingkungan?'
+    }
+  ]);
+  const [aiChatInput, setAiChatInput] = useState('');
+  const [aiChatLoading, setAiChatLoading] = useState(false);
+  const [aiDraftLoading, setAiDraftLoading] = useState(false);
+  const [aiPosterLoading, setAiPosterLoading] = useState(false);
+  const [playingAudioId, setPlayingAudioId] = useState(null);
+  const [audioLoadingId, setAudioLoadingId] = useState(null);
+  const audioRef = useRef(null);
+
+  // Form Modals / Inputs State
+  const [newAnnouncement, setNewAnnouncement] = useState({ title: '', content: '', category: 'Penting', customCategory: '' });
+  const [newFinance, setNewFinance] = useState({ type: 'Masuk', description: '', amount: '', date: new Date().toISOString().split('T')[0] });
+  
+  // Agenda RT Form State
+  const [newAgenda, setNewAgenda] = useState({
+    title: '',
+    date: new Date().toISOString().split('T')[0],
+    time: '08:00 WIB',
+    location: 'Pos Ronda / Balai RT 003',
+    desc: '',
+    category: 'Kerja Bakti',
+    photo: null
+  });
+  
+  // Letter Form State
+  const [newLetter, setNewLetter] = useState({ 
+    type: 'Surat Keterangan SKTM', 
+    customType: '', 
+    note: '', 
+    applicantName: '', 
+    nik: '' 
+  });
+  
+  // Complaint Form State
+  const [newComplaint, setNewComplaint] = useState({ 
+    category: 'Keamanan & Ketertiban', 
+    customCategory: '',
+    title: '', 
+    message: '',
+    photo: null 
+  });
+  const [complaintReply, setComplaintReply] = useState({});
+
+  // Structure Edit State
+  const [editingStructure, setEditingStructure] = useState(null);
+  const [showStructureModal, setShowStructureModal] = useState(false);
+  const [structureForm, setStructureForm] = useState({ id: '', title: '', name: '', desc: '', code: 'RT', photo: null });
+
+  // Admin New Resident Form State
+  const [newResident, setNewResident] = useState({ 
+    fullName: '', 
+    nik: '', 
+    kkNumber: '', 
+    username: '', 
+    email: '', 
+    phone: '', 
+    blockNumber: '', 
+    residentStatus: 'Tetap', 
+    role: 'warga' 
+  });
+
+  // Filters & Search
+  const [residentSearch, setResidentSearch] = useState('');
+  const [financeFilter, setFinanceFilter] = useState('All');
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth init error:", err);
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setAuthUser(user);
+      const savedProfile = localStorage.getItem('rt003_session_user');
+      if (savedProfile) {
+        try {
+          setUserProfile(JSON.parse(savedProfile));
+        } catch (e) {
+          console.error("Error parsing saved profile session", e);
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!authUser) return;
+
+    const getColRef = (colName) => collection(db, 'artifacts', appId, 'public', 'data', colName);
+
+    const unsubUsers = onSnapshot(getColRef('users'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      setUsersList(docs);
+    }, err => console.error("Users sync error:", err));
+
+    const unsubAnnounce = onSnapshot(getColRef('announcements'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setAnnouncements(docs);
+    }, err => console.error("Announcements sync error:", err));
+
+    const unsubFinances = onSnapshot(getColRef('finances'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+      setFinances(docs);
+    }, err => console.error("Finances sync error:", err));
+
+    const unsubLetters = onSnapshot(getColRef('letters'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setLetters(docs);
+    }, err => console.error("Letters sync error:", err));
+
+    const unsubComplaints = onSnapshot(getColRef('complaints'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setComplaints(docs);
+    }, err => console.error("Complaints sync error:", err));
+
+    const unsubStructure = onSnapshot(getColRef('structure'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      setStructureList(docs);
+    }, err => console.error("Structure sync error:", err));
+
+    const unsubEvents = onSnapshot(getColRef('events'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0));
+      setEventsList(docs);
+    }, err => console.error("Events sync error:", err));
+
+    const unsubNotifs = onSnapshot(getColRef('notifications'), (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      docs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setNotifications(docs);
+    }, err => console.error("Notifications sync error:", err));
+
+    return () => {
+      unsubUsers();
+      unsubAnnounce();
+      unsubFinances();
+      unsubLetters();
+      unsubComplaints();
+      unsubStructure();
+      unsubEvents();
+      unsubNotifs();
+    };
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser || announcements.length > 0) return;
+
+    const seedInitialData = async () => {
+      try {
+        const getColRef = (colName) => collection(db, 'artifacts', appId, 'public', 'data', colName);
+
+        const initialOfficers = [
+          { code: 'RT', title: 'Ketua RT 003', name: 'H. Sulaeman', desc: 'Bertanggung jawab atas jalannya tata kelola lingkungan dan pelayanan warga RT 003.' },
+          { code: 'SEK', title: 'Sekretaris RT', name: 'Ahmad Fauzi, S.T.', desc: 'Mengelola administrasi kependudukan, persuratan, dan dokumentasi pengumuman.' },
+          { code: 'BEN', title: 'Bendahara RT', name: 'Ibu Hj. Maryam', desc: 'Mengelola penerimaan kas, iuran bulanan warga, dan transparansi pengeluaran RT.' },
+          { code: 'KAM', title: 'Seksi Keamanan & Siskamling', name: 'Bapak Bambang', desc: 'Koordinasi regu ronda malam, pos keamanan, dan ketertiban lingkungan.' },
+          { code: 'BER', title: 'Seksi Kebersihan & Pembangunan', name: 'Bapak Supriadi', desc: 'Koordinasi jadwal pengangkutan sampah, kerja bakti, dan perbaikan sarana jalan/got.' },
+          { code: 'ROH', title: 'Seksi Kerohanian & Kemasyarakatan', name: 'Ust. Nurhayati', desc: 'Penyelenggaraan pengajian rutin, takziah warga, dan kegiatan sosial keagamaan.' }
+        ];
+
+        for (const off of initialOfficers) {
+          await addDoc(getColRef('structure'), off);
+        }
+
+        await addDoc(getColRef('announcements'), {
+          title: 'Kerja Bakti Massal Kebersihan Lingkungan RT 003',
+          content: 'Dihimbau kepada seluruh warga RT 003 RW 037 Desa Muktiwari untuk mengikuti Kerja Bakti Kebersihan Saluran Air menjelang musim hujan pada hari Minggu besok pukul 07.00 WIB.',
+          category: 'Kegiatan Warga',
+          author: 'Pengurus RT 003',
+          createdAt: new Date().toISOString()
+        });
+
+        await addDoc(getColRef('finances'), {
+          description: 'Pemasukan Iuran Kas Bulanan Warga Juli 2026',
+          type: 'Masuk',
+          amount: 2500000,
+          date: '2026-07-01',
+          recordedBy: 'Bendahara RT'
+        });
+
+        await addDoc(getColRef('events'), {
+          title: 'Kerja Bakti Kebersihan Saluran Air & Selokan',
+          date: '2026-08-02',
+          time: '07:00 - 11:00 WIB',
+          location: 'Area Lingkungan Blok A & B RT 003',
+          desc: 'Pembersihan got & persiapan menghadapi musim hujan. Harap membawa cangkul & alat kebersihan.',
+          category: 'Kerja Bakti',
+          createdBy: 'Ketua RT 003'
+        });
+
+      } catch (e) {
+        console.error("Seeding initial data failed", e);
+      }
+    };
+
+    seedInitialData();
+  }, [authUser, announcements.length]);
+
+  const isPengurus = userProfile?.role === 'pengurus';
+
+  const userNotifications = useMemo(() => {
+    if (!userProfile) return [];
+    return notifications.filter(n => {
+      if (n.targetUsername) {
+        return userProfile.username && n.targetUsername.toLowerCase() === userProfile.username.toLowerCase();
+      }
+      if (n.targetRole) {
+        if (n.targetRole === 'pengurus') return isPengurus;
+        if (n.targetRole === 'warga') return !isPengurus;
+        if (n.targetRole === 'all') return true;
+      }
+      return true;
+    });
+  }, [notifications, userProfile, isPengurus]);
+
+  const unreadNotifCount = useMemo(() => {
+    return userNotifications.filter(n => !n.read).length;
+  }, [userNotifications]);
+
+  const handleToggleNotifDropdown = async () => {
+    const nextState = !showNotifDropdown;
+    setShowNotifDropdown(nextState);
+
+    if (nextState) {
+      const unreadList = userNotifications.filter(n => !n.read);
+      for (const notif of unreadList) {
+        if (notif.id) {
+          try {
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'notifications', notif.id), {
+              read: true
+            });
+          } catch (err) {
+            console.error("Error updating read status:", err);
+          }
+        }
+      }
+    }
+  };
+
+  const handleSendAiChatMessage = async (e, customPrompt = '') => {
+    if (e) e.preventDefault();
+    const query = customPrompt || aiChatInput.trim();
+    if (!query) return;
+
+    const newMessages = [...aiChatMessages, { sender: 'user', text: query }];
+    setAiChatMessages(newMessages);
+    if (!customPrompt) setAiChatInput('');
+    setAiChatLoading(true);
+
+    try {
+      const systemInst = `Anda adalah "Asisten AI RT 003 Muktiwari", asisten virtual cerdas, ramah, dan solutif untuk warga & pengurus RT 003 RW 037 Desa Muktiwari, Kecamatan Cibitung, Kabupaten Bekasi.
+Tugas Anda adalah membantu memberikan informasi syarat persuratan RT (SKTM, SKU, Domisili, KTP/KK, SKCK, Beda Nama), cara bayar iuran kas, jadwal kegiatan warga/siskamling/sampah, serta saran kemasyarakatan. Jawablah dengan sopan, ringkas, dan jelas dalam Bahasa Indonesia.`;
+
+      const aiResponseText = await callGeminiTextApi(query, systemInst);
+      setAiChatMessages([...newMessages, { sender: 'ai', text: aiResponseText }]);
+    } catch (err) {
+      console.error("AI Chat error:", err);
+      setAiChatMessages([
+        ...newMessages,
+        { sender: 'ai', text: 'Mohon maaf, koneksi AI sedang sibuk. Silakan coba beberapa saat lagi.' }
+      ]);
+    } finally {
+      setAiChatLoading(false);
+    }
+  };
+
+  const handleAiDraftAnnouncement = async () => {
+    if (!newAnnouncement.title) {
+      alert("Masukkan Judul Pengumuman terlebih dahulu agar AI dapat merangkumkan isinya!");
+      return;
+    }
+    setAiDraftLoading(true);
+    try {
+      const prompt = `Buatkan draf pengumuman resmi RT yang sopan, rapi, dan informatif berdasarkan judul berikut: "${newAnnouncement.title}" dengan kategori "${newAnnouncement.category}".`;
+      const systemInst = `Act as an expert secretary for RT 003 RW 037 Muktiwari. Provide only the announcement body text without markdown preamble.`;
+      const result = await callGeminiTextApi(prompt, systemInst);
+      setNewAnnouncement(prev => ({ ...prev, content: result.trim() }));
+    } catch (e) {
+      alert("Gagal membuat draf dengan AI: " + e.message);
+    } finally {
+      setAiDraftLoading(false);
+    }
+  };
+
+  const handleAiDraftComplaintReply = async (complaintId, title, message) => {
+    setAiDraftLoading(true);
+    try {
+      const prompt = `Berikan draf balasan resmi dan penuh solusi dari Pengurus RT 003 Muktiwari atas aduan warga berikut:
+Judul Aduan: "${title}"
+Rincian Aduan: "${message}"`;
+      const systemInst = `You are the RT leader of RT 003. Provide a helpful, empathetic response in Indonesian in 2-3 sentences.`;
+      const result = await callGeminiTextApi(prompt, systemInst);
+      setComplaintReply(prev => ({ ...prev, [complaintId]: result.trim() }));
+    } catch (e) {
+      alert("Gagal membuat balasan AI: " + e.message);
+    } finally {
+      setAiDraftLoading(false);
+    }
+  };
+
+  const handleAiGenerateEventPoster = async () => {
+    if (!newAgenda.title) {
+      alert("Tuliskan Nama Agenda / Kegiatan terlebih dahulu untuk membuat poster AI!");
+      return;
+    }
+    setAiPosterLoading(true);
+    try {
+      const posterImage = await callImagenApi(newAgenda.title);
+      setNewAgenda(prev => ({ ...prev, photo: posterImage }));
+    } catch (e) {
+      alert("Gagal membuat poster AI: " + e.message);
+    } finally {
+      setAiPosterLoading(false);
+    }
+  };
+
+  const handlePlayAnnouncementTts = async (id, text) => {
+    if (playingAudioId === id) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      setPlayingAudioId(null);
+      return;
+    }
+
+    setAudioLoadingId(id);
+    try {
+      const audioUrl = await callGeminiTtsApi(text);
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      const audio = new Audio(audioUrl);
+      audioRef.current = audio;
+      setPlayingAudioId(id);
+      audio.play();
+      audio.onended = () => {
+        setPlayingAudioId(null);
+      };
+    } catch (e) {
+      alert("Gagal memutar suara audio AI: " + e.message);
+    } finally {
+      setAudioLoadingId(null);
+    }
+  };
+
+  const handleUserAvatarUpload = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      try {
+        const photoData = await compressImage(file, 250, 250, 0.75);
+        const updatedProfile = { ...userProfile, avatarUrl: photoData };
+        setUserProfile(updatedProfile);
+        localStorage.setItem('rt003_session_user', JSON.stringify(updatedProfile));
+
+        if (userProfile?.id) {
+          await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userProfile.id), {
+            avatarUrl: photoData
+          });
+        }
+      } catch (err) {
+        console.error("Error updating avatar in Firestore:", err);
+      }
+    }
+    e.target.value = null;
+  };
+
+  const maskNumber = (str) => {
+    if (!str || str === '-') return '-';
+    if (str.length <= 4) return '****************';
+    return str.substring(0, 4) + '************';
+  };
+
+  const handlePhotoAgendaUpload = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      try {
+        const photoData = await compressImage(file, 800, 600, 0.7);
+        setNewAgenda(prev => ({ ...prev, photo: photoData }));
+      } catch (err) {
+        console.error("Error compressing agenda photo:", err);
+      }
+    }
+    e.target.value = null;
+  };
+
+  const handleSendPushNotifIuran = async (targetUser) => {
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'notifications'), {
+        targetUsername: targetUser.username,
+        targetFullName: targetUser.fullName,
+        targetBlock: targetUser.blockNumber,
+        title: '⚠️ Pengingat Pembayaran Iuran Kas RT 003',
+        message: `Halo Bpk/Ibu ${targetUser.fullName} (${targetUser.blockNumber}), mohon segera melakukan konfirmasi pembayaran iuran bulanan RT 003 Desa Muktiwari. Terima kasih!`,
+        type: 'iuran',
+        createdAt: new Date().toISOString(),
+        read: false
+      });
+      alert(`Push Notifikasi Tagihan Iuran berhasil dikirimkan ke ${targetUser.fullName}!`);
+    } catch (e) {
+      console.error("Error sending push notification:", e);
+    }
+  };
+
+  const handleCreateAgenda = async (e) => {
+    e.preventDefault();
+    if (!newAgenda.title || !newAgenda.date) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'events'), {
+        title: newAgenda.title,
+        date: newAgenda.date,
+        time: newAgenda.time || '08:00 WIB',
+        location: newAgenda.location || 'Lingkungan RT 003',
+        desc: newAgenda.desc || '-',
+        category: newAgenda.category,
+        photoUrl: newAgenda.photo || null,
+        createdBy: userProfile.fullName,
+        createdAt: new Date().toISOString()
+      });
+
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'notifications'), {
+        targetRole: 'all',
+        title: `📅 Agenda RT Baru: ${newAgenda.title}`,
+        message: `Telah dijadwalkan ${newAgenda.title} pada ${newAgenda.date} pukul ${newAgenda.time}. Lokasi: ${newAgenda.location}`,
+        type: 'agenda',
+        createdAt: new Date().toISOString(),
+        read: false
+      });
+
+      setNewAgenda({
+        title: '',
+        date: new Date().toISOString().split('T')[0],
+        time: '08:00 WIB',
+        location: 'Pos Ronda / Balai RT 003',
+        desc: '',
+        category: 'Kerja Bakti',
+        photo: null
+      });
+      alert("Agenda Kegiatan RT berhasil ditambahkan!");
+    } catch (e) {
+      console.error("Error adding agenda event:", e);
+    }
+  };
+
+  const handleDeleteAgenda = async (id) => {
+    if (!window.confirm("Apakah Anda yakin ingin menghapus agenda kegiatan ini?")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'events', id));
+    } catch (e) {
+      console.error("Error deleting agenda:", e);
+    }
+  };
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+
+    if (!registerForm.fullName || !registerForm.nik || !registerForm.kkNumber || !registerForm.username || !registerForm.password || !registerForm.blockNumber) {
+      setAuthError('Harap isi semua kolom wajib (termasuk NIK dan No. KK)!');
+      return;
+    }
+
+    if (registerForm.role === 'pengurus') {
+      if (registerForm.passcode !== PENGURUS_PASSCODE) {
+        setAuthError(`Kode Verifikasi Pengurus Salah! Hubungi pengurus RT untuk mendapatkan passcode.`);
+        return;
+      }
+      
+      const currentPengurusCount = usersList.filter(u => u.role === 'pengurus').length;
+      if (currentPengurusCount >= 3) {
+        setAuthError('Kuota akun Pengurus RT sudah penuh! Maksimal 3 anggota pengurus.');
+        return;
+      }
+    }
+
+    const existing = usersList.find(u => 
+      u.username?.toLowerCase() === registerForm.username.toLowerCase()
+    );
+
+    if (existing) {
+      setAuthError('Username sudah terdaftar dalam sistem!');
+      return;
+    }
+
+    try {
+      const newUserDoc = {
+        fullName: registerForm.fullName,
+        nik: registerForm.nik,
+        kkNumber: registerForm.kkNumber,
+        email: registerForm.email || `${registerForm.username}@rt003.local`,
+        username: registerForm.username,
+        password: registerForm.password,
+        phone: registerForm.phone,
+        blockNumber: registerForm.blockNumber,
+        residentStatus: registerForm.residentStatus,
+        role: registerForm.role,
+        iuranStatus: 'Belum Bayar',
+        createdAt: new Date().toISOString()
+      };
+
+      const userDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', `user_${Date.now()}`);
+      await setDoc(userDocRef, newUserDoc);
+
+      setAuthSuccess('Pendaftaran berhasil! Silakan login menggunakan Username Anda.');
+      setAuthMode('login');
+      setRegisterForm({
+        fullName: '', nik: '', kkNumber: '', email: '', username: '', password: '', phone: '', blockNumber: '', residentStatus: 'Tetap', role: 'warga', passcode: ''
+      });
+    } catch (err) {
+      console.error("Register error:", err);
+      setAuthError('Gagal mendaftar ke server. Coba lagi.');
+    }
+  };
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+
+    const query = loginForm.identifier.trim().toLowerCase();
+    const pwd = loginForm.password;
+
+    if (!query || !pwd) {
+      setAuthError('Masukkan Username dan Password!');
+      return;
+    }
+
+    const matchedUser = usersList.find(u => 
+      u.username?.toLowerCase() === query && u.password === pwd
+    );
+
+    if (matchedUser) {
+      const loginTime = new Date().toISOString();
+      const updatedHistory = Array.isArray(matchedUser.loginHistory) 
+        ? [loginTime, ...matchedUser.loginHistory].slice(0, 50) 
+        : [loginTime];
+
+      const updatedUser = { ...matchedUser, lastLogin: loginTime, loginHistory: updatedHistory };
+      setUserProfile(updatedUser);
+      localStorage.setItem('rt003_session_user', JSON.stringify(updatedUser));
+      setLoginForm({ identifier: '', password: '' });
+
+      if (matchedUser.id) {
+        updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', matchedUser.id), {
+          lastLogin: loginTime,
+          loginHistory: updatedHistory
+        }).catch(err => console.error("Error updating login history:", err));
+      }
+    } else {
+      setAuthError('Username atau Password salah. Silakan coba lagi!');
+    }
+  };
+
+  const handleLogout = () => {
+    setShowLogoutModal(true);
+  };
+
+  const confirmLogout = () => {
+    setUserProfile(null);
+    localStorage.removeItem('rt003_session_user');
+    setActiveTab('dashboard');
+    setShowLogoutModal(false);
+  };
+
+  const handleAddResidentByAdmin = async (e) => {
+    e.preventDefault();
+    if (!newResident.fullName || !newResident.blockNumber) return;
+
+    if (newResident.role === 'pengurus') {
+      const currentPengurusCount = usersList.filter(u => u.role === 'pengurus').length;
+      if (currentPengurusCount >= 3) {
+        alert('Kuota akun Pengurus RT sudah penuh! Maksimal 3 anggota pengurus.');
+        return;
+      }
+    }
+
+    try {
+      const newUserDoc = {
+        fullName: newResident.fullName,
+        nik: newResident.nik || '-',
+        kkNumber: newResident.kkNumber || '-',
+        email: newResident.email || `${newResident.username || Date.now()}@rt003.local`,
+        username: newResident.username || `warga_${Date.now()}`,
+        password: '123',
+        phone: newResident.phone || '-',
+        blockNumber: newResident.blockNumber,
+        residentStatus: newResident.residentStatus,
+        role: newResident.role,
+        iuranStatus: 'Belum Bayar',
+        createdAt: new Date().toISOString()
+      };
+
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'users'), newUserDoc);
+      setNewResident({ fullName: '', nik: '', kkNumber: '', username: '', email: '', phone: '', blockNumber: '', residentStatus: 'Tetap', role: 'warga' });
+    } catch (e) {
+      console.error("Error adding resident:", e);
+    }
+  };
+
+  const handleDeleteUser = async (userId) => {
+    if (!window.confirm("Apakah Anda yakin ingin menghapus data warga ini?")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userId));
+    } catch (e) {
+      console.error("Error deleting user:", e);
+    }
+  };
+
+  const handleCreateAnnouncement = async (e) => {
+    e.preventDefault();
+    const finalCategory = newAnnouncement.category === 'Lainnya' ? (newAnnouncement.customCategory || 'Informasi Umum') : newAnnouncement.category;
+
+    if (!newAnnouncement.title || !newAnnouncement.content) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'announcements'), {
+        title: newAnnouncement.title,
+        content: newAnnouncement.content,
+        category: finalCategory,
+        author: userProfile.fullName || 'Pengurus RT 003',
+        createdAt: new Date().toISOString()
+      });
+
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'notifications'), {
+        targetRole: 'all',
+        title: `📢 Pengumuman RT: ${newAnnouncement.title}`,
+        message: newAnnouncement.content.length > 90 ? newAnnouncement.content.substring(0, 90) + '...' : newAnnouncement.content,
+        type: 'pengumuman',
+        createdAt: new Date().toISOString(),
+        read: false
+      });
+
+      setNewAnnouncement({ title: '', content: '', category: 'Penting', customCategory: '' });
+      alert("Pengumuman berhasil dipublikasikan & notifikasi terkirim!");
+    } catch (e) {
+      console.error("Error creating announcement:", e);
+    }
+  };
+
+  const handleDeleteAnnouncement = async (id) => {
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'announcements', id));
+    } catch (e) {
+      console.error("Error deleting announcement:", e);
+    }
+  };
+
+  const handleAddFinance = async (e) => {
+    e.preventDefault();
+    if (!newFinance.description || !newFinance.amount) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'finances'), {
+        description: newFinance.description,
+        type: newFinance.type,
+        amount: parseFloat(newFinance.amount),
+        date: newFinance.date,
+        recordedBy: userProfile.fullName
+      });
+      setNewFinance({ type: 'Masuk', description: '', amount: '', date: new Date().toISOString().split('T')[0] });
+    } catch (e) {
+      console.error("Error adding finance record:", e);
+    }
+  };
+
+  const handleDeleteFinance = async (id) => {
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'finances', id));
+    } catch (e) {
+      console.error("Error deleting finance record:", e);
+    }
+  };
+
+  const handleToggleIuranStatus = async (targetUserId, currentStatus) => {
+    const nextStatus = currentStatus === 'Lunas' ? 'Belum Bayar' : 'Lunas';
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', targetUserId), {
+        iuranStatus: nextStatus,
+        iuranUpdatedAt: new Date().toISOString()
+      });
+    } catch (e) {
+      console.error("Error updating iuran status:", e);
+    }
+  };
+
+  const handleApplyLetter = async (e) => {
+    e.preventDefault();
+    const finalType = newLetter.type === 'Lainnya' ? (newLetter.customType || 'Surat Pengantar RT') : newLetter.type;
+    const applicantName = newLetter.applicantName || userProfile?.fullName || 'Warga RT 003';
+    const applicantNik = newLetter.nik || userProfile?.nik || '-';
+    
+    if (!finalType || !applicantName) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'letters'), {
+        type: finalType,
+        applicantName: applicantName,
+        nik: applicantNik,
+        blockNumber: userProfile?.blockNumber || '-',
+        note: newLetter.note || '-',
+        status: 'Menunggu',
+        userEmail: userProfile?.email || '',
+        username: userProfile?.username || '',
+        createdAt: new Date().toISOString()
+      });
+
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'notifications'), {
+        targetRole: 'pengurus',
+        title: '📄 Pengajuan Surat Baru',
+        message: `${applicantName} (${userProfile?.blockNumber || 'RT 003'}) mengajukan ${finalType}.`,
+        type: 'surat',
+        createdAt: new Date().toISOString(),
+        read: false
+      });
+
+      setNewLetter({ type: 'Surat Keterangan SKTM', customType: '', note: '', applicantName: '', nik: '' });
+      alert("Pengajuan surat berhasil dikirimkan ke Pengurus RT 003!");
+    } catch (e) {
+      console.error("Error applying letter:", e);
+      alert("Gagal mengirim pengajuan surat: " + e.message);
+    }
+  };
+
+  const handleUpdateLetterStatus = async (item, newStatus) => {
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'letters', item.id), {
+        status: newStatus,
+        approvedBy: userProfile.fullName,
+        updatedAt: new Date().toISOString()
+      });
+
+      if (item.username) {
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'notifications'), {
+          targetUsername: item.username,
+          title: `📄 Status Surat: ${newStatus}`,
+          message: `Pengajuan ${item.type} Anda telah ${newStatus.toLowerCase()} oleh Pengurus RT.`,
+          type: 'surat',
+          createdAt: new Date().toISOString(),
+          read: false
+        });
+      }
+    } catch (e) {
+      console.error("Error updating letter status:", e);
+    }
+  };
+
+  const handlePhotoUpload = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      try {
+        const photoData = await compressImage(file, 800, 600, 0.7);
+        setNewComplaint(prev => ({ ...prev, photo: photoData }));
+      } catch (err) {
+        console.error("Error compressing complaint photo:", err);
+      }
+    }
+    e.target.value = null;
+  };
+
+  const handleSendComplaint = async (e) => {
+    e.preventDefault();
+    const finalCategory = newComplaint.category === 'Lainnya' ? (newComplaint.customCategory || 'Aduan Umum') : newComplaint.category;
+
+    if (!newComplaint.title || !newComplaint.message) return;
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'complaints'), {
+        category: finalCategory,
+        title: newComplaint.title,
+        message: newComplaint.message,
+        photoUrl: newComplaint.photo || null,
+        authorName: userProfile.fullName,
+        authorBlock: userProfile.blockNumber,
+        status: 'Pending',
+        replies: [],
+        createdAt: new Date().toISOString()
+      });
+
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'notifications'), {
+        targetRole: 'pengurus',
+        title: `💬 Aduan/Aspirasi Warga Baru`,
+        message: `${userProfile.fullName} (${userProfile.blockNumber}): ${newComplaint.title}`,
+        type: 'aspirasi',
+        createdAt: new Date().toISOString(),
+        read: false
+      });
+
+      setNewComplaint({ category: 'Keamanan & Ketertiban', customCategory: '', title: '', message: '', photo: null });
+      alert("Aduan/Aspirasi Anda berhasil terkirim secara realtime ke Pengurus RT!");
+    } catch (e) {
+      console.error("Error sending complaint:", e);
+    }
+  };
+
+  const handleReplyComplaint = async (complaintId, currentReplies = []) => {
+    const replyText = complaintReply[complaintId];
+    if (!replyText || !replyText.trim()) return;
+
+    try {
+      const updatedReplies = [
+        ...currentReplies,
+        {
+          sender: userProfile.fullName,
+          role: userProfile.role,
+          message: replyText.trim(),
+          timestamp: new Date().toISOString()
+        }
+      ];
+
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'complaints', complaintId), {
+        replies: updatedReplies,
+        status: userProfile.role === 'pengurus' ? 'Diproses' : 'Pending'
+      });
+
+      setComplaintReply({ ...complaintReply, [complaintId]: '' });
+    } catch (e) {
+      console.error("Error replying to complaint:", e);
+    }
+  };
+
+  const handleUpdateComplaintStatus = async (complaintId, status) => {
+    try {
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'complaints', complaintId), {
+        status: status
+      });
+    } catch (e) {
+      console.error("Error updating complaint status:", e);
+    }
+  };
+
+  const handleOpenEditStructure = (officer) => {
+    if (officer) {
+      setEditingStructure(officer);
+      setStructureForm({ 
+        id: officer.id, 
+        title: officer.title, 
+        name: officer.name, 
+        desc: officer.desc, 
+        code: officer.code || 'RT',
+        photo: officer.photoUrl || null
+      });
+    } else {
+      setEditingStructure(null);
+      setStructureForm({ id: '', title: '', name: '', desc: '', code: 'SKS', photo: null });
+    }
+    setShowStructureModal(true);
+  };
+
+  const handlePhotoStructureUpload = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      try {
+        const photoData = await compressImage(file, 300, 300, 0.75);
+        setStructureForm(prev => ({ ...prev, photo: photoData }));
+      } catch (err) {
+        console.error("Error compressing structure photo:", err);
+      }
+    }
+    e.target.value = null;
+  };
+
+  const handleSaveStructure = async (e) => {
+    e.preventDefault();
+    if (!structureForm.title || !structureForm.name) return;
+
+    try {
+      if (editingStructure && editingStructure.id) {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'structure', editingStructure.id), {
+          title: structureForm.title,
+          name: structureForm.name,
+          desc: structureForm.desc,
+          code: structureForm.code,
+          photoUrl: structureForm.photo || null
+        });
+      } else {
+        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'structure'), {
+          title: structureForm.title,
+          name: structureForm.name,
+          desc: structureForm.desc,
+          code: structureForm.code,
+          photoUrl: structureForm.photo || null
+        });
+      }
+      setShowStructureModal(false);
+      setEditingStructure(null);
+      setStructureForm({ id: '', title: '', name: '', desc: '', code: 'RT', photo: null });
+    } catch (e) {
+      console.error("Error saving structure:", e);
+    }
+  };
+
+  const handleDeleteStructure = async (id) => {
+    if (!window.confirm("Apakah Anda yakin ingin menghapus jabatan pengurus ini?")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'structure', id));
+    } catch (e) {
+      console.error("Error deleting structure item:", e);
+    }
+  };
+
+  const financeSummary = useMemo(() => {
+    let totalMasuk = 0;
+    let totalKeluar = 0;
+    finances.forEach(item => {
+      if (item.type === 'Masuk') totalMasuk += Number(item.amount || 0);
+      if (item.type === 'Keluar') totalKeluar += Number(item.amount || 0);
+    });
+    return {
+      totalMasuk,
+      totalKeluar,
+      saldo: totalMasuk - totalKeluar
+    };
+  }, [finances]);
+
+  const filteredFinances = useMemo(() => {
+    if (financeFilter === 'All') return finances;
+    return finances.filter(item => item.type === financeFilter);
+  }, [finances, financeFilter]);
+
+  const filteredResidents = useMemo(() => {
+    if (!residentSearch) return usersList;
+    const q = residentSearch.toLowerCase();
+    return usersList.filter(u => 
+      u.fullName?.toLowerCase().includes(q) || 
+      u.blockNumber?.toLowerCase().includes(q) ||
+      u.username?.toLowerCase().includes(q) ||
+      u.nik?.toLowerCase().includes(q) ||
+      u.kkNumber?.toLowerCase().includes(q)
+    );
+  }, [usersList, residentSearch]);
+
+  if (!userProfile) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col justify-center items-center p-4 font-sans relative overflow-hidden">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
+
+        <div className="max-w-md w-full bg-slate-800/90 backdrop-blur-xl border border-slate-700/80 rounded-2xl shadow-2xl p-6 sm:p-8 z-10">
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center mb-2">
+              <LogoGHP className="w-24 h-24 drop-shadow-xl" />
+            </div>
+            <h1 className="text-2xl font-bold text-white tracking-tight">RT 003 / RW 037</h1>
+            <p className="text-emerald-400 font-medium text-sm">GHP Smart Village - Desa Muktiwari</p>
+            <p className="text-slate-400 text-xs mt-1">Sistem Informasi Kependudukan & Pelayanan Realtime</p>
+          </div>
+
+          {authError && (
+            <div className="mb-4 p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{authError}</span>
+            </div>
+          )}
+          {authSuccess && (
+            <div className="mb-4 p-3 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs flex items-center gap-2">
+              <CheckCircle className="w-4 h-4 shrink-0" />
+              <span>{authSuccess}</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 p-1 bg-slate-900/60 rounded-xl mb-6 text-sm font-semibold border border-slate-700/50">
+            <button 
+              onClick={() => { setAuthMode('login'); setAuthError(''); setAuthSuccess(''); }}
+              className={`py-2 rounded-lg transition-all ${authMode === 'login' ? 'bg-emerald-500 text-slate-950 shadow-md font-bold' : 'text-slate-400 hover:text-white'}`}
+            >
+              Masuk (Login)
+            </button>
+            <button 
+              onClick={() => { setAuthMode('register'); setAuthError(''); setAuthSuccess(''); }}
+              className={`py-2 rounded-lg transition-all ${authMode === 'register' ? 'bg-emerald-500 text-slate-950 shadow-md font-bold' : 'text-slate-400 hover:text-white'}`}
+            >
+              Daftar Akun
+            </button>
+          </div>
+
+          {authMode === 'login' ? (
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Username</label>
+                <div className="relative">
+                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                  <input 
+                    type="text"
+                    required
+                    placeholder="Masukkan username Anda..."
+                    value={loginForm.identifier}
+                    onChange={(e) => setLoginForm({ ...loginForm, identifier: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl pl-9 pr-3 py-2 text-sm text-slate-100 placeholder-slate-500 transition-all outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Password</label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                  <input 
+                    type={showLoginPassword ? "text" : "password"}
+                    required
+                    placeholder="••••••••"
+                    value={loginForm.password}
+                    onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl pl-9 pr-10 py-2 text-sm text-slate-100 placeholder-slate-500 transition-all outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword(!showLoginPassword)}
+                    className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200 transition-colors"
+                    title={showLoginPassword ? "Sembunyikan password" : "Tampilkan password"}
+                  >
+                    {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <button 
+                  type="submit"
+                  className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold py-2.5 rounded-xl shadow-lg shadow-emerald-500/20 transition-all flex items-center justify-center gap-2"
+                >
+                  <span>Masuk ke Portal RT</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="text-center pt-3 border-t border-slate-700/50">
+                <p className="text-xs text-slate-400">Portal Resmi RT 003 / RW 037 Desa Muktiwari</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">Silakan login atau daftar akun baru bagi warga / pengurus.</p>
+                <p className="text-[10px] font-bold text-emerald-400 tracking-wider uppercase mt-2">CREATED BY SEKRETARIS RT 003</p>
+              </div>
+            </form>
+          ) : (
+            <form onSubmit={handleRegister} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Nama Lengkap</label>
+                <input 
+                  type="text"
+                  required
+                  placeholder="Sesuai KTP"
+                  value={registerForm.fullName}
+                  onChange={(e) => setRegisterForm({ ...registerForm, fullName: e.target.value })}
+                  className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">NIK (16 Digit)</label>
+                  <input 
+                    type="text"
+                    required
+                    maxLength={16}
+                    placeholder="Nomor NIK KTP"
+                    value={registerForm.nik}
+                    onChange={(e) => setRegisterForm({ ...registerForm, nik: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">No. KK (16 Digit)</label>
+                  <input 
+                    type="text"
+                    required
+                    maxLength={16}
+                    placeholder="Nomor Kartu Keluarga"
+                    value={registerForm.kkNumber}
+                    onChange={(e) => setRegisterForm({ ...registerForm, kkNumber: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Username</label>
+                  <input 
+                    type="text"
+                    required
+                    placeholder="Contoh: ahmad03"
+                    value={registerForm.username}
+                    onChange={(e) => setRegisterForm({ ...registerForm, username: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Blok / No. Rumah</label>
+                  <input 
+                    type="text"
+                    required
+                    placeholder="Blok B3 No. 12"
+                    value={registerForm.blockNumber}
+                    onChange={(e) => setRegisterForm({ ...registerForm, blockNumber: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Email (Opsional)</label>
+                  <input 
+                    type="email"
+                    placeholder="nama@email.com"
+                    value={registerForm.email}
+                    onChange={(e) => setRegisterForm({ ...registerForm, email: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">No. HP / WA</label>
+                  <input 
+                    type="text"
+                    placeholder="081234..."
+                    value={registerForm.phone}
+                    onChange={(e) => setRegisterForm({ ...registerForm, phone: e.target.value })}
+                    className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Password</label>
+                  <div className="relative">
+                    <input 
+                      type={showRegisterPassword ? "text" : "password"}
+                      required
+                      placeholder="••••••••"
+                      value={registerForm.password}
+                      onChange={(e) => setRegisterForm({ ...registerForm, password: e.target.value })}
+                      className="w-full bg-slate-900/80 border border-slate-700 focus:border-emerald-500 rounded-xl pl-3 pr-10 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRegisterPassword(!showRegisterPassword)}
+                      className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200 transition-colors"
+                      title={showRegisterPassword ? "Sembunyikan password" : "Tampilkan password"}
+                    >
+                      {showRegisterPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Status Tempat Tinggal</label>
+                  <div className="grid grid-cols-2 gap-1 p-1 bg-slate-900 rounded-xl border border-slate-700">
+                    <button 
+                      type="button"
+                      onClick={() => setRegisterForm({ ...registerForm, residentStatus: 'Tetap' })}
+                      className={`py-1.5 rounded-lg text-xs font-semibold transition-all ${registerForm.residentStatus === 'Tetap' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                      Warga Tetap
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => setRegisterForm({ ...registerForm, residentStatus: 'Sementara' })}
+                      className={`py-1.5 rounded-lg text-xs font-semibold transition-all ${registerForm.residentStatus === 'Sementara' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                      Warga Sementara
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Daftar Sebagai Role</label>
+                <div className="grid grid-cols-2 gap-2 p-1 bg-slate-900 rounded-xl border border-slate-700">
+                  <button 
+                    type="button"
+                    onClick={() => setRegisterForm({ ...registerForm, role: 'warga' })}
+                    className={`py-1.5 rounded-lg text-xs font-semibold ${registerForm.role === 'warga' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400'}`}
+                  >
+                    Warga RT
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => setRegisterForm({ ...registerForm, role: 'pengurus' })}
+                    className={`py-1.5 rounded-lg text-xs font-semibold ${registerForm.role === 'pengurus' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400'}`}
+                  >
+                    Pengurus RT
+                  </button>
+                </div>
+              </div>
+
+              {registerForm.role === 'pengurus' && (
+                <div>
+                  <label className="block text-xs font-semibold text-amber-300 mb-1">Kode Verifikasi Pengurus</label>
+                  <input 
+                    type="text"
+                    required
+                    placeholder="Masukkan passcode pengurus"
+                    value={registerForm.passcode}
+                    onChange={(e) => setRegisterForm({ ...registerForm, passcode: e.target.value })}
+                    className="w-full bg-amber-950/30 border border-amber-500/50 focus:border-amber-400 rounded-xl px-3 py-2 text-sm text-amber-200 placeholder-amber-500/60 outline-none"
+                  />
+                  <p className="text-[10px] text-amber-400/80 mt-1">*Passcode Demo: <span className="font-bold">RT003MUKTI</span></p>
+                </div>
+              )}
+
+              <button 
+                type="submit"
+                className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2.5 rounded-xl shadow-lg transition-all mt-2"
+              >
+                Buat Akun Sekarang
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col md:flex-row">
+      {/* Sidebar Navigation */}
+      <aside className="w-full md:w-64 bg-slate-900 border-b md:border-b-0 md:border-r border-slate-800 p-4 shrink-0 flex flex-col justify-between">
+        <div>
+          <div className="flex items-center gap-3 px-2 py-3 mb-6 border-b border-slate-800">
+            <LogoGHP className="w-10 h-10 shrink-0 drop-shadow-md" />
+            <div>
+              <h2 className="font-bold text-white text-sm leading-tight">RT 003 / RW 037</h2>
+              <p className="text-[11px] text-emerald-400">GHP Smart Village</p>
+            </div>
+          </div>
+
+          <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl p-3 mb-6">
+            <div className="flex items-center gap-2.5">
+              {/* Profile Avatar Circle with Upload Trigger */}
+              <label className="relative group cursor-pointer shrink-0" title="Klik untuk ganti foto profil Anda">
+                <div className="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center text-xs shrink-0 border border-emerald-500/30 overflow-hidden relative">
+                  {userProfile.avatarUrl ? (
+                    <img src={userProfile.avatarUrl} alt="Avatar Profile" className="w-full h-full object-cover" />
+                  ) : (
+                    <span>{userProfile.fullName ? userProfile.fullName.charAt(0).toUpperCase() : 'W'}</span>
+                  )}
+                  <div className="absolute inset-0 bg-slate-950/70 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-all text-white">
+                    <Camera className="w-4 h-4 text-emerald-300" />
+                  </div>
+                </div>
+                <input type="file" accept="image/*" onChange={handleUserAvatarUpload} className="hidden" />
+              </label>
+
+              <div className="overflow-hidden">
+                <p className="text-xs font-bold text-white truncate">{userProfile.fullName}</p>
+                <p className="text-[10px] text-slate-400 font-mono truncate">{userProfile.blockNumber} • <span className={isPengurus ? "text-amber-400 font-bold" : "text-emerald-400"}>{isPengurus ? "Pengurus" : "Warga"}</span></p>
+              </div>
+            </div>
+          </div>
+
+          <nav className="space-y-1">
+            <button
+              onClick={() => setActiveTab('dashboard')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'dashboard' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+            >
+              <Home className="w-4 h-4" />
+              <span>Beranda & Pengumuman</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('aichat')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'aichat' ? 'bg-gradient-to-r from-amber-400 to-emerald-400 text-slate-950 font-bold shadow-md' : 'text-amber-300 hover:bg-slate-800'}`}
+            >
+              <Bot className="w-4 h-4 text-slate-950" />
+              <span className="flex items-center gap-1.5">
+                <span>Asisten AI RT</span>
+                <span className="px-1.5 py-0.5 bg-slate-950 text-amber-300 text-[9px] font-bold rounded-full">Gemini</span>
+              </span>
+            </button>
+
+            {isPengurus && (
+              <button
+                onClick={() => setActiveTab('residents')}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'residents' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+              >
+                <Users className="w-4 h-4" />
+                <span>Kelola Data Warga</span>
+              </button>
+            )}
+
+            <button
+              onClick={() => setActiveTab('finances')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'finances' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+            >
+              <DollarSign className="w-4 h-4" />
+              <span>Kas & Transparansi Keuangan</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('events')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'events' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+            >
+              <Calendar className="w-4 h-4" />
+              <span>Agenda Kegiatan RT</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('letters')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'letters' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+            >
+              <FileText className="w-4 h-4" />
+              <span>Surat Pengantar RT</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('complaints')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'complaints' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+            >
+              <MessageSquare className="w-4 h-4" />
+              <span>Layanan Aduan & Aspirasi</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('structure')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'structure' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+            >
+              <Award className="w-4 h-4" />
+              <span>Struktur Organisasi RT</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('loginHistory')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${activeTab === 'loginHistory' ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20' : 'text-slate-300 hover:bg-slate-800 hover:text-white'}`}
+            >
+              <Clock className="w-4 h-4" />
+              <span>Riwayat Login</span>
+            </button>
+          </nav>
+        </div>
+
+        <div className="pt-4 border-t border-slate-800 space-y-2">
+          <button
+            onClick={() => setShowSecurityModal(true)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-400 hover:text-emerald-400 transition-colors"
+          >
+            <ShieldCheck className="w-4 h-4" />
+            <span>Arsitektur & Rule DB</span>
+          </button>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-rose-400 hover:text-rose-300 transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>Keluar / Logout</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content View */}
+      <main className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto">
+        {/* Top Header Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 mb-6 border-b border-slate-800">
+          <div>
+            <div className="inline-flex items-center gap-2 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-emerald-400 text-[11px] font-bold mb-1">
+              <span>{isPengurus ? "MODE: PENGURUS" : "MODE: WARGA RT"}</span>
+              <span>• Realtime Sync Active</span>
+            </div>
+            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+              Portal Kepengurusan & Pelayanan RT 003 RW 037 Desa Muktiwari
+            </h1>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="px-3 py-2 bg-slate-800 rounded-xl border border-slate-700 text-xs text-slate-300 flex items-center gap-1.5">
+              <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Desa Muktiwari, Kec. Cibitung</span>
+            </div>
+
+            <div className="relative flex items-center gap-2">
+              <button 
+                onClick={handleToggleNotifDropdown}
+                className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl relative transition-all"
+                title="Notifikasi & Pemberitahuan RT"
+              >
+                <Bell className="w-5 h-5 text-amber-400" />
+                {unreadNotifCount > 0 && (
+                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-rose-500 text-white font-black text-[10px] rounded-full flex items-center justify-center animate-pulse border-2 border-slate-900">
+                    {unreadNotifCount}
+                  </span>
+                )}
+              </button>
+
+              {showNotifDropdown && (
+                <div className="absolute right-0 top-12 w-80 sm:w-96 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl z-50 p-4 space-y-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                    <h4 className="font-bold text-white text-xs flex items-center gap-2">
+                      <Bell className="w-4 h-4 text-amber-400" />
+                      <span>Notifikasi RT 003 ({userNotifications.length})</span>
+                    </h4>
+                    <button onClick={() => setShowNotifDropdown(false)} className="text-slate-400 hover:text-white text-xs">Tutup</button>
+                  </div>
+
+                  <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+                    {userNotifications.length === 0 ? (
+                      <p className="text-xs text-slate-400 text-center py-4">Belum ada notifikasi baru.</p>
+                    ) : (
+                      userNotifications.map((notif, idx) => (
+                        <div key={idx} className="p-2.5 bg-slate-800/80 rounded-xl border border-slate-700 text-xs space-y-1">
+                          <p className="font-bold text-emerald-400">{notif.title}</p>
+                          <p className="text-slate-300 leading-relaxed">{notif.message}</p>
+                          <p className="text-[10px] text-slate-500 font-mono text-right">
+                            {notif.createdAt ? new Date(notif.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Baru saja'}
+                          </p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {}
+        {activeTab === 'dashboard' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center gap-4">
+                <div className="w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold">
+                  <Users className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400 font-medium">Total Warga Terdaftar</p>
+                  <p className="text-xl font-bold text-white">{usersList.length}</p>
+                  <p className="text-[10px] text-emerald-400">Penduduk RT 003</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center gap-4">
+                <div className="w-12 h-12 rounded-xl bg-teal-500/10 text-teal-400 flex items-center justify-center font-bold">
+                  <DollarSign className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400 font-medium">Saldo Kas RT 003</p>
+                  <p className="text-xl font-bold text-emerald-400">Rp {financeSummary.saldo.toLocaleString('id-ID')}</p>
+                  <p className="text-[10px] text-slate-400">Transparan & Realtime</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center gap-4">
+                <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center font-bold">
+                  <FileText className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400 font-medium">Surat Pengantar</p>
+                  <p className="text-xl font-bold text-white">{letters.length}</p>
+                  <p className="text-[10px] text-amber-400">{letters.filter(l => l.status === 'Menunggu').length} Menunggu Diproses</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Form Buat Pengumuman Baru (Khusus Pengurus) */}
+            {isPengurus && (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                    <Megaphone className="w-4 h-4 text-emerald-400" />
+                    <span>Publikasikan Pengumuman RT Baru</span>
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={handleAiDraftAnnouncement}
+                    disabled={aiDraftLoading}
+                    className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-emerald-500 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 hover:opacity-90 disabled:opacity-50 transition-all shadow-md"
+                  >
+                    {aiDraftLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    <span>Draf dengan AI</span>
+                  </button>
+                </div>
+
+                <form onSubmit={handleCreateAnnouncement} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Pilih Kategori Pengumuman</label>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        'Penting', 
+                        'Kegiatan Warga', 
+                        'Keamanan & Ronda', 
+                        'Informasi Umum', 
+                        'Gotong Royong / Kerja Bakti', 
+                        'Keuangan & Iuran', 
+                        'Musyawarah / Rapat', 
+                        'Lainnya'
+                      ].map(cat => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => setNewAnnouncement({ ...newAnnouncement, category: cat })}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${newAnnouncement.category === cat ? 'bg-emerald-500 text-slate-950 font-bold shadow-md' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
+                        >
+                          • {cat}
+                        </button>
+                      ))}
+                    </div>
+
+                    {newAnnouncement.category === 'Lainnya' && (
+                      <input 
+                        type="text"
+                        required
+                        placeholder="Tuliskan kategori kustom pengumuman..."
+                        value={newAnnouncement.customCategory}
+                        onChange={(e) => setNewAnnouncement({ ...newAnnouncement, customCategory: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none mt-2"
+                      />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Judul Pengumuman</label>
+                    <input 
+                      type="text"
+                      required
+                      placeholder="Judul pengumuman resmi..."
+                      value={newAnnouncement.title}
+                      onChange={(e) => setNewAnnouncement({ ...newAnnouncement, title: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Isi Pengumuman</label>
+                    <textarea 
+                      required
+                      rows={3}
+                      placeholder="Tuliskan detail pengumuman untuk seluruh warga RT 003..."
+                      value={newAnnouncement.content}
+                      onChange={(e) => setNewAnnouncement({ ...newAnnouncement, content: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none resize-none"
+                    />
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button 
+                      type="submit"
+                      className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs transition-all flex items-center gap-1.5"
+                    >
+                      <Megaphone className="w-3.5 h-3.5" />
+                      <span>Sebarkan Pengumuman</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* Feed Pengumuman RT */}
+            <div className="space-y-4">
+              <h3 className="font-bold text-white text-base flex items-center gap-2">
+                <Megaphone className="w-5 h-5 text-emerald-400" />
+                <span>Pengumuman & Informasi Terbaru RT 003</span>
+              </h3>
+
+              {announcements.length === 0 ? (
+                <div className="p-8 text-center bg-slate-900 border border-slate-800 rounded-2xl text-slate-400 text-xs">
+                  Belum ada pengumuman terbaru saat ini.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {announcements.map(item => (
+                    <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3 flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <span className="px-2.5 py-0.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold text-[10px] rounded-full">
+                            {item.category}
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {item.createdAt ? new Date(item.createdAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '-'}
+                          </span>
+                        </div>
+                        <h4 className="font-bold text-white text-sm leading-snug">{item.title}</h4>
+                        <p className="text-xs text-slate-300 mt-2 whitespace-pre-line leading-relaxed">{item.content}</p>
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+                        <div className="flex items-center gap-2">
+                          <span>Penulis: <strong className="text-slate-200">{item.author}</strong></span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handlePlayAnnouncementTts(item.id, `${item.title}. ${item.content}`)}
+                            disabled={audioLoadingId === item.id}
+                            className="px-2.5 py-1 bg-amber-500/15 border border-amber-500/30 text-amber-300 font-bold text-[10px] rounded-lg flex items-center gap-1 hover:bg-amber-500/25 transition-all"
+                            title="Putar suara audio AI pengumuman"
+                          >
+                            {audioLoadingId === item.id ? (
+                              <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+                            ) : playingAudioId === item.id ? (
+                              <>
+                                <VolumeX className="w-3 h-3 text-rose-400" />
+                                <span>Stop Audio</span>
+                              </>
+                            ) : (
+                              <>
+                                <Volume2 className="w-3 h-3 text-amber-400" />
+                                <span>Suara AI</span>
+                              </>
+                            )}
+                          </button>
+                          {isPengurus && (
+                            <button 
+                              onClick={() => handleDeleteAnnouncement(item.id)}
+                              className="text-rose-400 hover:text-rose-300 transition-colors"
+                              title="Hapus pengumuman"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === 'aichat' && (
+          <div className="space-y-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-amber-400 to-emerald-400 flex items-center justify-center text-slate-950 font-bold shadow-lg">
+                  <Bot className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Asisten AI RT 003 Muktiwari</h3>
+                  <p className="text-xs text-slate-400">Pusat bantuan cerdas seputar pelayanan, administrasi, dan info lingkungan warga</p>
+                </div>
+              </div>
+
+              {/* Quick Suggestion Chips */}
+              <div className="flex flex-wrap gap-2 text-xs">
+                {[
+                  "Syarat buat Surat SKTM?",
+                  "Bagaimana cara pembayaran iuran kas?",
+                  "Apa saja jadwal kegiatan RT bulan ini?",
+                  "Syarat pengajuan Surat Domisili / Pindah?"
+                ].map((chip, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => handleSendAiChatMessage(null, chip)}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 rounded-xl font-medium transition-all text-left"
+                  >
+                    ✨ {chip}
+                  </button>
+                ))}
+              </div>
+
+              {/* Chat Thread Messages */}
+              <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 min-h-[350px] max-h-[450px] overflow-y-auto space-y-3">
+                {aiChatMessages.map((msg, index) => (
+                  <div
+                    key={index}
+                    className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-3.5 text-xs leading-relaxed ${
+                        msg.sender === 'user'
+                          ? 'bg-emerald-500 text-slate-950 font-medium rounded-tr-none'
+                          : 'bg-slate-900 border border-slate-800 text-slate-200 rounded-tl-none space-y-1'
+                      }`}
+                    >
+                      {msg.sender === 'ai' && (
+                        <div className="flex items-center gap-1.5 text-amber-400 font-bold text-[10px] mb-1">
+                          <Sparkles className="w-3 h-3" />
+                          <span>Asisten AI RT 003</span>
+                        </div>
+                      )}
+                      <p className="whitespace-pre-line">{msg.text}</p>
+                    </div>
+                  </div>
+                ))}
+                {aiChatLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-slate-900 border border-slate-800 text-slate-400 rounded-2xl p-3.5 text-xs flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                      <span>Asisten AI sedang mengetik jawaban...</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Chat Input Box */}
+              <form onSubmit={(e) => handleSendAiChatMessage(e)} className="flex gap-2">
+                <input 
+                  type="text"
+                  placeholder="Tanyakan sesuatu ke Asisten AI RT (Contoh: Syarat buat SKU usaha)..."
+                  value={aiChatInput}
+                  onChange={(e) => setAiChatInput(e.target.value)}
+                  className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-xs text-slate-100 outline-none focus:border-emerald-500"
+                />
+                <button
+                  type="submit"
+                  disabled={aiChatLoading}
+                  className="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-md disabled:opacity-50 transition-all"
+                >
+                  <Send className="w-4 h-4" />
+                  <span>Kirim</span>
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === 'residents' && isPengurus && (
+          <div className="space-y-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                <Users className="w-4 h-4 text-emerald-400" />
+                <span>Pendaftaran Data Warga Baru (Input Pengurus)</span>
+              </h3>
+
+              <form onSubmit={handleAddResidentByAdmin} className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                <input 
+                  type="text"
+                  required
+                  placeholder="Nama Lengkap Warga"
+                  value={newResident.fullName}
+                  onChange={(e) => setNewResident({ ...newResident, fullName: e.target.value })}
+                  className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                />
+                <input 
+                  type="text"
+                  placeholder="NIK Warga"
+                  maxLength={16}
+                  value={newResident.nik}
+                  onChange={(e) => setNewResident({ ...newResident, nik: e.target.value })}
+                  className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none font-mono"
+                />
+                <input 
+                  type="text"
+                  placeholder="No. KK Warga"
+                  maxLength={16}
+                  value={newResident.kkNumber}
+                  onChange={(e) => setNewResident({ ...newResident, kkNumber: e.target.value })}
+                  className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none font-mono"
+                />
+                <input 
+                  type="text"
+                  required
+                  placeholder="Blok / No. Rumah (Contoh: A3 No 12)"
+                  value={newResident.blockNumber}
+                  onChange={(e) => setNewResident({ ...newResident, blockNumber: e.target.value })}
+                  className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                />
+                <input 
+                  type="text"
+                  placeholder="Username Login (Opsional)"
+                  value={newResident.username}
+                  onChange={(e) => setNewResident({ ...newResident, username: e.target.value })}
+                  className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                />
+                <input 
+                  type="text"
+                  placeholder="No. HP / WhatsApp"
+                  value={newResident.phone}
+                  onChange={(e) => setNewResident({ ...newResident, phone: e.target.value })}
+                  className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                />
+                <div className="grid grid-cols-2 gap-1 p-1 bg-slate-950 rounded-xl border border-slate-700">
+                  <button 
+                    type="button"
+                    onClick={() => setNewResident({ ...newResident, residentStatus: 'Tetap' })}
+                    className={`py-1 rounded-lg text-[11px] font-semibold transition-all ${newResident.residentStatus === 'Tetap' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400'}`}
+                  >
+                    Warga Tetap
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => setNewResident({ ...newResident, residentStatus: 'Sementara' })}
+                    className={`py-1 rounded-lg text-[11px] font-semibold transition-all ${newResident.residentStatus === 'Sementara' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400'}`}
+                  >
+                    Warga Sementara
+                  </button>
+                </div>
+
+                <button 
+                  type="submit"
+                  className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs py-2 transition-all flex items-center justify-center gap-1"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Tambah Warga</span>
+                </button>
+              </form>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <h3 className="font-bold text-white text-sm">Direktori Data Kependudukan RT 003</h3>
+                <div className="relative w-full sm:w-64">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input 
+                    type="text"
+                    placeholder="Cari nama, blok, NIK, No. KK..."
+                    value={residentSearch}
+                    onChange={(e) => setResidentSearch(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-3 py-1.5 text-xs text-slate-100 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-semibold bg-slate-950/50">
+                      <th className="p-3">Nama Warga</th>
+                      <th className="p-3">NIK / No. KK</th>
+                      <th className="p-3">Blok / Rumah</th>
+                      <th className="p-3">Username</th>
+                      <th className="p-3">No. HP</th>
+                      <th className="p-3">Status</th>
+                      <th className="p-3 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/50">
+                    {filteredResidents.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="p-6 text-center text-slate-500">Tidak ada data warga ditemukan.</td>
+                      </tr>
+                    ) : (
+                      filteredResidents.map(u => (
+                        <tr key={u.id} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="p-3 font-bold text-white">{u.fullName}</td>
+                          <td className="p-3 font-mono text-slate-300">
+                            <div>NIK: {isPengurus ? (u.nik || '-') : maskNumber(u.nik)}</div>
+                            <div className="text-[10px] text-slate-400">KK: {isPengurus ? (u.kkNumber || '-') : maskNumber(u.kkNumber)}</div>
+                          </td>
+                          <td className="p-3 text-emerald-400 font-medium">{u.blockNumber}</td>
+                          <td className="p-3 font-mono text-slate-300">{u.username}</td>
+                          <td className="p-3 text-slate-300">{u.phone || '-'}</td>
+                          <td className="p-3">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${u.residentStatus === 'Tetap' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'}`}>
+                              {u.residentStatus === 'Tetap' ? 'Warga Tetap' : 'Warga Sementara'}
+                            </span>
+                          </td>
+                          <td className="p-3 text-right">
+                            <button 
+                              onClick={() => handleDeleteUser(u.id)}
+                              className="text-rose-400 hover:text-rose-300 p-1"
+                              title="Hapus data warga"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === 'finances' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-400 font-medium">Total Pemasukan Kas</p>
+                <p className="text-xl font-bold text-emerald-400 mt-1">Rp {financeSummary.totalMasuk.toLocaleString('id-ID')}</p>
+              </div>
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-400 font-medium">Total Pengeluaran Kas</p>
+                <p className="text-xl font-bold text-rose-400 mt-1">Rp {financeSummary.totalKeluar.toLocaleString('id-ID')}</p>
+              </div>
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs text-slate-400 font-medium">Saldo Kas Bersih</p>
+                <p className="text-xl font-bold text-white mt-1">Rp {financeSummary.saldo.toLocaleString('id-ID')}</p>
+              </div>
+            </div>
+
+            {/* Input Kas Baru (Pengurus Only) */}
+            {isPengurus && (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                  <DollarSign className="w-4 h-4 text-emerald-400" />
+                  <span>Catat Transaksi Kas Baru (Bendahara)</span>
+                </h3>
+
+                <form onSubmit={handleAddFinance} className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 gap-1 p-1 bg-slate-950 rounded-xl border border-slate-700">
+                    <button 
+                      type="button"
+                      onClick={() => setNewFinance({ ...newFinance, type: 'Masuk' })}
+                      className={`py-1.5 rounded-lg text-xs font-semibold transition-all ${newFinance.type === 'Masuk' ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400'}`}
+                    >
+                      Pemasukan (+)
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => setNewFinance({ ...newFinance, type: 'Keluar' })}
+                      className={`py-1.5 rounded-lg text-xs font-semibold transition-all ${newFinance.type === 'Keluar' ? 'bg-rose-500 text-white font-bold' : 'text-slate-400'}`}
+                    >
+                      Pengeluaran (-)
+                    </button>
+                  </div>
+
+                  <input 
+                    type="text"
+                    required
+                    placeholder="Keterangan transaksi..."
+                    value={newFinance.description}
+                    onChange={(e) => setNewFinance({ ...newFinance, description: e.target.value })}
+                    className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                  />
+                  <input 
+                    type="number"
+                    required
+                    placeholder="Nominal (Rp)"
+                    value={newFinance.amount}
+                    onChange={(e) => setNewFinance({ ...newFinance, amount: e.target.value })}
+                    className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none font-mono"
+                  />
+                  <input 
+                    type="date"
+                    required
+                    value={newFinance.date}
+                    onChange={(e) => setNewFinance({ ...newFinance, date: e.target.value })}
+                    className="bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                  />
+
+                  <div className="sm:col-span-2 md:col-span-4 flex justify-end">
+                    <button 
+                      type="submit"
+                      className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs transition-all flex items-center gap-1.5"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Simpan Catatan Kas</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* TABEL STATUS IURAN BULANAN WARGA */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-white text-sm">Status Pembayaran Iuran Warga RT 003</h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5">Pantau status konfirmasi iuran kas bulanan warga</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[11px] font-bold rounded-xl">
+                    Lunas: {usersList.filter(u => u.iuranStatus === 'Lunas').length}
+                  </span>
+                  <span className="px-2.5 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[11px] font-bold rounded-xl">
+                    Belum Bayar: {usersList.filter(u => u.iuranStatus !== 'Lunas').length}
+                  </span>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-semibold bg-slate-950/50">
+                      <th className="p-3">Nama Warga</th>
+                      <th className="p-3">Blok / Rumah</th>
+                      <th className="p-3">Status Iuran Kas</th>
+                      <th className="p-3 text-right">Kontrol Status (Pengurus)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/50">
+                    {usersList.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="p-6 text-center text-slate-500">Belum ada data warga terdaftar.</td>
+                      </tr>
+                    ) : (
+                      usersList.map(u => {
+                        const isLunas = u.iuranStatus === 'Lunas';
+                        return (
+                          <tr key={u.id} className="hover:bg-slate-800/40 transition-colors">
+                            <td className="p-3 font-bold text-white">{u.fullName}</td>
+                            <td className="p-3 text-slate-300">{u.blockNumber}</td>
+                            <td className="p-3">
+                              <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${isLunas ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}`}>
+                                {isLunas ? '✓ LUNAS' : '⚠️ BELUM BAYAR'}
+                              </span>
+                            </td>
+                            <td className="p-3 text-right space-x-2">
+                              {isPengurus ? (
+                                <>
+                                  {!isLunas && (
+                                    <button
+                                      onClick={() => handleSendPushNotifIuran(u)}
+                                      className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold rounded-lg text-[10px] border border-amber-500/30 transition-all inline-flex items-center gap-1"
+                                      title="Kirim Notifikasi Lonceng Tagihan"
+                                    >
+                                      <Bell className="w-3 h-3" />
+                                      <span>Push Notif</span>
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => handleToggleIuranStatus(u.id, u.iuranStatus)}
+                                    className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-all ${isLunas ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30' : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'}`}
+                                  >
+                                    {isLunas ? 'Tandai Belum Bayar' : 'Tandai Lunas'}
+                                  </button>
+                                </>
+                              ) : (
+                                <span className="text-[10px] text-slate-500">Read-Only</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Riwayat Mutasi Transaksi Kas */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-white text-sm">Riwayat Mutasi Kas RT 003</h3>
+                <div className="flex gap-1 p-1 bg-slate-950 rounded-xl border border-slate-800 text-xs">
+                  {['All', 'Masuk', 'Keluar'].map(f => (
+                    <button 
+                      key={f}
+                      onClick={() => setFinanceFilter(f)}
+                      className={`px-3 py-1 rounded-lg font-semibold transition-all ${financeFilter === f ? 'bg-emerald-500 text-slate-950 font-bold' : 'text-slate-400'}`}
+                    >
+                      {f === 'All' ? 'Semua' : f}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-semibold bg-slate-950/50">
+                      <th className="p-3">Tanggal</th>
+                      <th className="p-3">Keterangan</th>
+                      <th className="p-3">Tipe</th>
+                      <th className="p-3">Nominal (Rp)</th>
+                      {isPengurus && <th className="p-3 text-right">Aksi</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/50">
+                    {filteredFinances.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-6 text-center text-slate-500">Belum ada riwayat transaksi kas.</td>
+                      </tr>
+                    ) : (
+                      filteredFinances.map(item => (
+                        <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="p-3 font-mono text-slate-400">{item.date}</td>
+                          <td className="p-3 font-medium text-white">{item.description}</td>
+                          <td className="p-3">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${item.type === 'Masuk' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+                              {item.type}
+                            </span>
+                          </td>
+                          <td className={`p-3 font-mono font-bold ${item.type === 'Masuk' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {item.type === 'Masuk' ? '+' : '-'} Rp {Number(item.amount || 0).toLocaleString('id-ID')}
+                          </td>
+                          {isPengurus && (
+                            <td className="p-3 text-right">
+                              <button 
+                                onClick={() => handleDeleteFinance(item.id)}
+                                className="text-rose-400 hover:text-rose-300"
+                                title="Hapus catatan"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === 'events' && (
+          <div className="space-y-6">
+            {/* Form Agenda RT Baru (Khusus Pengurus) */}
+            {isPengurus && (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                    <Calendar className="w-4 h-4 text-emerald-400" />
+                    <span>Jadwalkan Agenda Kegiatan RT Baru</span>
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={handleAiGenerateEventPoster}
+                    disabled={aiPosterLoading}
+                    className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-emerald-500 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 hover:opacity-90 disabled:opacity-50 transition-all shadow-md"
+                  >
+                    {aiPosterLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                    <span>Generate Poster AI</span>
+                  </button>
+                </div>
+
+                <form onSubmit={handleCreateAgenda} className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Nama Agenda / Kegiatan</label>
+                      <input 
+                        type="text"
+                        required
+                        placeholder="Contoh: Kerja Bakti Gotong Royong Saluran Air"
+                        value={newAgenda.title}
+                        onChange={(e) => setNewAgenda({ ...newAgenda, title: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Kategori Kegiatan</label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {['Kerja Bakti', 'Rapat RT', 'Pengajian', 'Siskamling', 'Olahraga', 'Lainnya'].map(cat => (
+                          <button
+                            key={cat}
+                            type="button"
+                            onClick={() => setNewAgenda({ ...newAgenda, category: cat })}
+                            className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold transition-all ${newAgenda.category === cat ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300'}`}
+                          >
+                            {cat}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Tanggal Pelaksanaan</label>
+                      <input 
+                        type="date"
+                        required
+                        value={newAgenda.date}
+                        onChange={(e) => setNewAgenda({ ...newAgenda, date: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Waktu / Jam</label>
+                      <input 
+                        type="text"
+                        placeholder="Contoh: 08:00 - 11:30 WIB"
+                        value={newAgenda.time}
+                        onChange={(e) => setNewAgenda({ ...newAgenda, time: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Lokasi Kegiatan</label>
+                      <input 
+                        type="text"
+                        placeholder="Contoh: Pos Ronda / Lapangan RT 003"
+                        value={newAgenda.location}
+                        onChange={(e) => setNewAgenda({ ...newAgenda, location: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Keterangan / Detail Kegiatan</label>
+                    <textarea 
+                      rows={2}
+                      placeholder="Detail instruksi atau peralatan yang perlu dibawa warga..."
+                      value={newAgenda.desc}
+                      onChange={(e) => setNewAgenda({ ...newAgenda, desc: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Foto / Poster Kegiatan (Opsional)</label>
+                    <div className="flex items-center gap-3">
+                      <label className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition-all">
+                        <Camera className="w-4 h-4 text-emerald-400" />
+                        <span>{newAgenda.photo ? "Ganti Foto Agenda" : "Unggah Foto Agenda"}</span>
+                        <input type="file" accept="image/*" onChange={handlePhotoAgendaUpload} className="hidden" />
+                      </label>
+                      {newAgenda.photo && (
+                        <div className="flex items-center gap-2">
+                          <img src={newAgenda.photo} alt="Preview Agenda" className="w-10 h-10 rounded-lg object-cover border border-emerald-500" />
+                          <button type="button" onClick={() => setNewAgenda({ ...newAgenda, photo: null })} className="text-rose-400 hover:text-rose-300 text-xs">Hapus Foto</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button 
+                      type="submit"
+                      className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs transition-all flex items-center gap-1.5"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Publikasikan Agenda RT</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* List Agenda RT */}
+            <div className="space-y-4">
+              <h3 className="font-bold text-white text-base flex items-center gap-2">
+                <Calendar className="w-5 h-5 text-emerald-400" />
+                <span>Jadwal Agenda & Kegiatan Warga RT 003</span>
+              </h3>
+
+              {eventsList.length === 0 ? (
+                <div className="p-8 text-center bg-slate-900 border border-slate-800 rounded-2xl text-slate-400 text-xs">
+                  Belum ada agenda kegiatan yang dijadwalkan saat ini.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {eventsList.map(ev => (
+                    <div key={ev.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3 flex flex-col justify-between">
+                      <div className="space-y-3">
+                        {ev.photoUrl && (
+                          <div className="w-full h-44 rounded-xl overflow-hidden border border-slate-800">
+                            <img src={ev.photoUrl} alt={ev.title} className="w-full h-full object-cover" />
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="px-2.5 py-0.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold text-[10px] rounded-full">
+                            {ev.category || 'Kegiatan RT'}
+                          </span>
+                          <span className="text-xs font-mono font-bold text-amber-400 flex items-center gap-1">
+                            <Calendar className="w-3.5 h-3.5" />
+                            {ev.date}
+                          </span>
+                        </div>
+                        <h4 className="font-bold text-white text-sm">{ev.title}</h4>
+                        <div className="space-y-1 text-xs text-slate-300 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                          <p className="flex items-center gap-2"><Clock className="w-3.5 h-3.5 text-emerald-400" /> Waktu: <strong>{ev.time}</strong></p>
+                          <p className="flex items-center gap-2"><MapPin className="w-3.5 h-3.5 text-emerald-400" /> Lokasi: <strong>{ev.location}</strong></p>
+                        </div>
+                        <p className="text-xs text-slate-300 leading-relaxed">{ev.desc}</p>
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+                        <span>Oleh: <strong className="text-slate-200">{ev.createdBy || 'Pengurus RT'}</strong></span>
+                        {isPengurus && (
+                          <button 
+                            onClick={() => handleDeleteAgenda(ev.id)}
+                            className="text-rose-400 hover:text-rose-300"
+                            title="Hapus agenda"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === 'letters' && (
+          <div className="space-y-6">
+            {/* Form Pengajuan Surat (Untuk Warga & Pengurus) */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                <FilePlus className="w-4 h-4 text-emerald-400" />
+                <span>Pengajuan Surat Pengantar RT</span>
+              </h3>
+
+              <form onSubmit={handleApplyLetter} className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Nama Pemohon (Sesuai KTP)</label>
+                    <input 
+                      type="text"
+                      required
+                      placeholder="Sesuai nama KTP..."
+                      value={newLetter.applicantName || userProfile.fullName}
+                      onChange={(e) => setNewLetter({ ...newLetter, applicantName: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">NIK Pemohon</label>
+                    <input 
+                      type="text"
+                      required
+                      maxLength={16}
+                      placeholder="Nomor NIK KTP..."
+                      value={newLetter.nik || userProfile.nik || ''}
+                      onChange={(e) => setNewLetter({ ...newLetter, nik: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Pilih Jenis Surat Pengantar</label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                    {[
+                      'Surat Keterangan SKTM',
+                      'Surat Pengantar Pindah Domisili',
+                      'Surat Keterangan Usaha (SKU)',
+                      'Surat Pengantar Pembuatan KTP / KK',
+                      'Surat Keterangan Belum Menikah',
+                      'Surat Keterangan Domisili',
+                      'Surat Keterangan Kelahiran / Kematian',
+                      'Surat Pengantar Beda Nama',
+                      'Surat Pengantar SKCK Catatan Kepolisian',
+                      'Lainnya'
+                    ].map(stype => (
+                      <button
+                        key={stype}
+                        type="button"
+                        onClick={() => setNewLetter({ ...newLetter, type: stype })}
+                        className={`p-2.5 rounded-xl text-xs font-semibold text-left border transition-all ${newLetter.type === stype ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 font-bold' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}`}
+                      >
+                        • {stype}
+                      </button>
+                    ))}
+                  </div>
+
+                  {newLetter.type === 'Lainnya' && (
+                    <input 
+                      type="text"
+                      required
+                      placeholder="Ketikkan jenis surat pengantar kustom..."
+                      value={newLetter.customType}
+                      onChange={(e) => setNewLetter({ ...newLetter, customType: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none mt-2"
+                    />
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Keperluan / Catatan Tambahan</label>
+                  <textarea 
+                    rows={2}
+                    placeholder="Tuliskan alasan atau keperluan pembuatan surat pengantar..."
+                    value={newLetter.note}
+                    onChange={(e) => setNewLetter({ ...newLetter, note: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none resize-none"
+                  />
+                </div>
+
+                <button 
+                  type="submit"
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2.5 rounded-xl shadow-md transition-all text-xs flex items-center justify-center gap-2"
+                >
+                  <Send className="w-4 h-4" />
+                  <span>Kirim Pengajuan Surat</span>
+                </button>
+              </form>
+            </div>
+
+            {/* Riwayat & Daftar Surat */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-white text-sm">Daftar Pengajuan Surat RT</h3>
+                <span className="text-xs text-slate-400">{letters.length} Total Surat</span>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-semibold bg-slate-950/50">
+                      <th className="p-3">Pemohon</th>
+                      <th className="p-3">Jenis Surat</th>
+                      <th className="p-3">Keperluan</th>
+                      <th className="p-3">Status</th>
+                      <th className="p-3 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/50">
+                    {letters.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-6 text-center text-slate-500">Belum ada riwayat pengajuan surat.</td>
+                      </tr>
+                    ) : (
+                      letters.map(item => (
+                        <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="p-3">
+                            <p className="font-bold text-white">{item.applicantName}</p>
+                            <p className="text-[10px] font-mono text-slate-400">NIK: {item.nik} • {item.blockNumber}</p>
+                          </td>
+                          <td className="p-3 font-medium text-emerald-400">{item.type}</td>
+                          <td className="p-3 text-slate-300 max-w-xs truncate">{item.note}</td>
+                          <td className="p-3">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${item.status === 'Disetujui' ? 'bg-emerald-500/20 text-emerald-400' : item.status === 'Ditolak' ? 'bg-rose-500/20 text-rose-400' : 'bg-amber-500/20 text-amber-300'}`}>
+                              {item.status}
+                            </span>
+                          </td>
+                          <td className="p-3 text-right space-x-1">
+                            <button 
+                              onClick={() => setShowPrintModal(item)}
+                              className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-[10px] font-bold border border-slate-700 inline-flex items-center gap-1"
+                              title="Cetak Surat Resmi"
+                            >
+                              <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>Cetak</span>
+                            </button>
+
+                            {isPengurus && item.status === 'Menunggu' && (
+                              <>
+                                <button 
+                                  onClick={() => handleUpdateLetterStatus(item, 'Disetujui')}
+                                  className="p-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg text-[10px] font-bold border border-emerald-500/30"
+                                >
+                                  Setujui
+                                </button>
+                                <button 
+                                  onClick={() => handleUpdateLetterStatus(item, 'Ditolak')}
+                                  className="p-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 rounded-lg text-[10px] font-bold border border-rose-500/30"
+                                >
+                                  Tolak
+                                </button>
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === 'complaints' && (
+          <div className="space-y-6">
+            {/* Form Kirim Aduan Baru */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                <MessageSquare className="w-4 h-4 text-emerald-400" />
+                <span>Kirim Aduan, Saran & Aspirasi Warga RT 003</span>
+              </h3>
+
+              <form onSubmit={handleSendComplaint} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Pilih Kategori Aspirasi</label>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      'Keamanan & Ketertiban',
+                      'Kebersihan & Sampah',
+                      'Lampu Jalan & Penerangan',
+                      'Drainase & Selokan',
+                      'Usulan Kegiatan Warga',
+                      'Kendala Kemasyarakatan',
+                      'Lainnya'
+                    ].map(cat => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setNewComplaint({ ...newComplaint, category: cat })}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${newComplaint.category === cat ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-950 text-slate-300 border border-slate-800'}`}
+                      >
+                        • {cat}
+                      </button>
+                    ))}
+                  </div>
+
+                  {newComplaint.category === 'Lainnya' && (
+                    <input 
+                      type="text"
+                      required
+                      placeholder="Tuliskan kategori aduan kustom..."
+                      value={newComplaint.customCategory}
+                      onChange={(e) => setNewComplaint({ ...newComplaint, customCategory: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none mt-2"
+                    />
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Judul Laporan / Aduan</label>
+                  <input 
+                    type="text"
+                    required
+                    placeholder="Ringkasan singkat masalah..."
+                    value={newComplaint.title}
+                    onChange={(e) => setNewComplaint({ ...newComplaint, title: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Rincian Laporan</label>
+                  <textarea 
+                    required
+                    rows={3}
+                    placeholder="Jelaskan detail aduan atau usulan Anda secara sopan..."
+                    value={newComplaint.message}
+                    onChange={(e) => setNewComplaint({ ...newComplaint, message: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none resize-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Unggah Foto Bukti / Lampiran (Opsional)</label>
+                  <div className="flex items-center gap-3">
+                    <label className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition-all">
+                      <Camera className="w-4 h-4 text-emerald-400" />
+                      <span>{newComplaint.photo ? "Ganti Foto" : "Pilih Foto Bukti"}</span>
+                      <input type="file" accept="image/*" onChange={handlePhotoUpload} className="hidden" />
+                    </label>
+                    {newComplaint.photo && (
+                      <div className="flex items-center gap-2">
+                        <img src={newComplaint.photo} alt="Preview Bukti" className="w-10 h-10 rounded-lg object-cover border border-emerald-500" />
+                        <button type="button" onClick={() => setNewComplaint({ ...newComplaint, photo: null })} className="text-rose-400 hover:text-rose-300 text-xs">Hapus Foto</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <button 
+                    type="submit"
+                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs transition-all flex items-center gap-1.5"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Kirim Aspirasi Realtime</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Thread Forum Aduan */}
+            <div className="space-y-4">
+              <h3 className="font-bold text-white text-base">Forum Diskusi Aduan Warga</h3>
+
+              {complaints.length === 0 ? (
+                <div className="p-8 text-center bg-slate-900 border border-slate-800 rounded-2xl text-slate-400 text-xs">
+                  Belum ada aduan atau aspirasi warga yang dikirimkan.
+                </div>
+              ) : (
+                complaints.map(item => (
+                  <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="px-2 py-0.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold text-[10px] rounded-full">
+                            {item.category}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${item.status === 'Selesai' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-300'}`}>
+                            Status: {item.status}
+                          </span>
+                        </div>
+                        <h4 className="font-bold text-white text-sm">{item.title}</h4>
+                        <p className="text-[11px] text-slate-400 mt-0.5">Oleh: <strong className="text-slate-200">{item.authorName}</strong> ({item.authorBlock})</p>
+                      </div>
+
+                      {isPengurus && (
+                        <div className="flex gap-1">
+                          <button 
+                            onClick={() => handleUpdateComplaintStatus(item.id, 'Diproses')}
+                            className="px-2 py-1 bg-amber-500/20 text-amber-300 rounded text-[10px] font-bold"
+                          >
+                            Proses
+                          </button>
+                          <button 
+                            onClick={() => handleUpdateComplaintStatus(item.id, 'Selesai')}
+                            className="px-2 py-1 bg-emerald-500/20 text-emerald-300 rounded text-[10px] font-bold"
+                          >
+                            Selesai
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <p className="text-xs text-slate-300 bg-slate-950 p-3 rounded-xl border border-slate-800 leading-relaxed whitespace-pre-line">
+                      {item.message}
+                    </p>
+
+                    {item.photoUrl && (
+                      <div>
+                        <p className="text-[10px] text-slate-400 mb-1">Lampiran Foto Bukti:</p>
+                        <img src={item.photoUrl} alt="Foto Lampiran" className="max-h-56 rounded-xl border border-slate-800 object-cover" />
+                      </div>
+                    )}
+
+                    {/* Replies Thread */}
+                    <div className="pl-4 border-l-2 border-slate-800 space-y-2 pt-2">
+                      {item.replies && item.replies.map((rep, ridx) => (
+                        <div key={ridx} className="bg-slate-950/70 p-2.5 rounded-xl text-xs space-y-0.5">
+                          <div className="flex items-center justify-between">
+                            <span className={`font-bold text-[11px] ${rep.role === 'pengurus' ? 'text-amber-400' : 'text-emerald-400'}`}>
+                              {rep.sender} {rep.role === 'pengurus' && '(Pengurus RT)'}
+                            </span>
+                            <span className="text-[9px] text-slate-500 font-mono">
+                              {rep.timestamp ? new Date(rep.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                            </span>
+                          </div>
+                          <p className="text-slate-300 text-xs">{rep.message}</p>
+                        </div>
+                      ))}
+
+                      {/* Reply Input Box */}
+                      <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                        <input 
+                          type="text"
+                          placeholder="Tuliskan tanggapan / respon..."
+                          value={complaintReply[item.id] || ''}
+                          onChange={(e) => setComplaintReply({ ...complaintReply, [item.id]: e.target.value })}
+                          className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-100 outline-none"
+                        />
+                        <div className="flex gap-2">
+                          {isPengurus && (
+                            <button 
+                              type="button"
+                              onClick={() => handleAiDraftComplaintReply(item.id, item.title, item.message)}
+                              disabled={aiDraftLoading}
+                              className="px-3 py-1.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 font-bold rounded-xl text-xs flex items-center gap-1 transition-all"
+                              title="Bantu draf balasan dengan AI Gemini"
+                            >
+                              <Sparkles className="w-3 h-3 text-amber-400" />
+                              <span>AI Balas</span>
+                            </button>
+                          )}
+                          <button 
+                            onClick={() => handleReplyComplaint(item.id, item.replies || [])}
+                            className="px-4 py-1.5 bg-emerald-500 text-slate-950 font-bold rounded-xl text-xs hover:bg-emerald-400 transition-all"
+                          >
+                            Kirim
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === 'structure' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-white text-base">Struktur Kepengurusan RT 003 RW 037</h3>
+                <p className="text-xs text-slate-400 mt-0.5">Masa Bakti Pengurus Aktif Desa Muktiwari</p>
+              </div>
+
+              {isPengurus && (
+                <button
+                  onClick={() => handleOpenEditStructure(null)}
+                  className="px-3 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs transition-all flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Tambah Pejabat RT</span>
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {structureList.map(officer => (
+                <div key={officer.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-center space-y-3 relative group">
+                  {isPengurus && (
+                    <div className="absolute top-3 right-3 flex gap-1 bg-slate-950/80 backdrop-blur-md p-1 rounded-xl border border-slate-800">
+                      <button 
+                        onClick={() => handleOpenEditStructure(officer)}
+                        className="p-1 text-emerald-400 hover:text-emerald-300"
+                        title="Edit Data Pengurus"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </button>
+                      <button 
+                        onClick={() => handleDeleteStructure(officer.id)}
+                        className="p-1 text-rose-400 hover:text-rose-300"
+                        title="Hapus Jabatan"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-extrabold flex items-center justify-center text-lg mx-auto shadow-inner overflow-hidden">
+                    {officer.photoUrl ? (
+                      <img src={officer.photoUrl} alt={officer.name} className="w-full h-full object-cover" />
+                    ) : (
+                      officer.code || 'RT'
+                    )}
+                  </div>
+
+                  <div>
+                    <h4 className="font-bold text-white text-sm">{officer.name}</h4>
+                    <p className="text-xs font-semibold text-emerald-400 mt-0.5">{officer.title}</p>
+                  </div>
+
+                  <p className="text-xs text-slate-400 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80">
+                    {officer.desc}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'loginHistory' && (
+          <div className="space-y-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                <div>
+                  <h3 className="font-bold text-white text-base flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-emerald-400" />
+                    <span>Riwayat Akses & Aktivitas Login RT 003</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {isPengurus 
+                      ? "Monitoring tanggal & jam login seluruh akun terdaftar secara realtime" 
+                      : "Catatan waktu sesi masuk akun Anda"}
+                  </p>
+                </div>
+              </div>
+
+              {isPengurus ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400 font-semibold bg-slate-950/50">
+                        <th className="p-3">Nama Warga</th>
+                        <th className="p-3">Username / Peran</th>
+                        <th className="p-3">Blok / No. Rumah</th>
+                        <th className="p-3">Waktu Login Terakhir</th>
+                        <th className="p-3">Total Akses</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/50">
+                      {usersList.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="p-6 text-center text-slate-500">Belum ada aktivitas login tercatat.</td>
+                        </tr>
+                      ) : (
+                        [...usersList]
+                          .sort((a, b) => new Date(b.lastLogin || 0) - new Date(a.lastLogin || 0))
+                          .map(u => (
+                            <tr key={u.id} className="hover:bg-slate-800/40 transition-colors">
+                              <td className="p-3 font-bold text-white">{u.fullName}</td>
+                              <td className="p-3 font-mono text-slate-300">
+                                <div>@{u.username}</div>
+                                <span className={`text-[10px] font-bold ${u.role === 'pengurus' ? 'text-amber-400' : 'text-emerald-400'}`}>
+                                  {u.role === 'pengurus' ? 'Pengurus' : 'Warga'}
+                                </span>
+                              </td>
+                              <td className="p-3 text-slate-300">{u.blockNumber || '-'}</td>
+                              <td className="p-3 font-mono text-emerald-400">
+                                {u.lastLogin ? new Date(u.lastLogin).toLocaleString('id-ID', {
+                                  day: '2-digit', month: 'short', year: 'numeric',
+                                  hour: '2-digit', minute: '2-digit', second: '2-digit'
+                                }) : 'Belum pernah login'}
+                              </td>
+                              <td className="p-3 font-mono text-slate-400">
+                                {Array.isArray(u.loginHistory) ? u.loginHistory.length : (u.lastLogin ? 1 : 0)}x Akses
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 text-xs space-y-1">
+                    <p className="text-slate-400">Akun Terdaftar: <strong className="text-white">{userProfile.fullName}</strong> (@{userProfile.username})</p>
+                    <p className="text-slate-400">Login Terakhir: <strong className="text-emerald-400 font-mono">{userProfile.lastLogin ? new Date(userProfile.lastLogin).toLocaleString('id-ID') : 'Sesi Aktif Sekarang'}</strong></p>
+                  </div>
+
+                  <h4 className="font-bold text-white text-xs pt-2">Daftar Sesi Masuk Terakhir Anda</h4>
+                  <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                    {Array.isArray(userProfile.loginHistory) && userProfile.loginHistory.length > 0 ? (
+                      userProfile.loginHistory.map((timestamp, idx) => (
+                        <div key={idx} className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center justify-between text-xs font-mono">
+                          <span className="text-emerald-400 flex items-center gap-2">
+                            <Clock className="w-3.5 h-3.5 text-amber-400" />
+                            {new Date(timestamp).toLocaleString('id-ID', {
+                              weekday: 'short', day: '2-digit', month: 'short', year: 'numeric',
+                              hour: '2-digit', minute: '2-digit', second: '2-digit'
+                            })}
+                          </span>
+                          <span className="text-[10px] text-slate-500 bg-slate-900 px-2 py-0.5 rounded-full border border-slate-800">
+                            Sesi #{userProfile.loginHistory.length - idx}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-slate-500 py-4 text-center">Belum ada riwayat sesi login tersimpan.</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {}
+      {showStructureModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 text-slate-100 max-w-md w-full rounded-2xl p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                <Edit className="w-4 h-4 text-emerald-400" />
+                <span>{editingStructure ? 'Edit Pejabat Pengurus RT' : 'Tambah Jabatan Pengurus RT'}</span>
+              </h3>
+              <button onClick={() => setShowStructureModal(false)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveStructure} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Nama Pejabat Pengurus</label>
+                <input 
+                  type="text"
+                  required
+                  placeholder="Contoh: Bapak H. Sulaeman"
+                  value={structureForm.name}
+                  onChange={(e) => setStructureForm({ ...structureForm, name: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Jabatan / Seksi</label>
+                <input 
+                  type="text"
+                  required
+                  placeholder="Contoh: Ketua RT 003 / Bendahara RT"
+                  value={structureForm.title}
+                  onChange={(e) => setStructureForm({ ...structureForm, title: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Kode Singkatan</label>
+                <input 
+                  type="text"
+                  required
+                  maxLength={4}
+                  placeholder="Contoh: KET / BEN / SEK"
+                  value={structureForm.code}
+                  onChange={(e) => setStructureForm({ ...structureForm, code: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none uppercase font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Upload Foto Pengurus (Opsional)</label>
+                <div className="flex items-center gap-3">
+                  <label className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 text-xs font-semibold cursor-pointer flex items-center gap-1.5 transition-all">
+                    <Camera className="w-4 h-4 text-amber-400" />
+                    <span>{structureForm.photo ? "Ganti Foto" : "Pilih Foto Pengurus"}</span>
+                    <input type="file" accept="image/*" onChange={handlePhotoStructureUpload} className="hidden" />
+                  </label>
+                  {structureForm.photo && (
+                    <div className="flex items-center gap-2">
+                      <img src={structureForm.photo} alt="Preview Profil" className="w-10 h-10 rounded-lg object-cover border border-amber-400" />
+                      <button type="button" onClick={() => setStructureForm({ ...structureForm, photo: null })} className="text-rose-400 hover:text-rose-300 text-xs">Hapus Foto</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Deskripsi Tugas & Tanggung Jawab</label>
+                <textarea 
+                  rows={2}
+                  placeholder="Deskripsi singkat wewenang dan pelayanan..."
+                  value={structureForm.desc}
+                  onChange={(e) => setStructureForm({ ...structureForm, desc: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-slate-100 outline-none resize-none"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowStructureModal(false)}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 font-bold rounded-xl text-xs"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs"
+                >
+                  Simpan Perubahan
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {}
+      {showPrintModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-white text-slate-900 max-w-xl w-full rounded-2xl p-6 space-y-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="text-center border-b-2 border-slate-900 pb-4">
+              <h2 className="text-base font-extrabold tracking-wider uppercase">Pemerintah Kabupaten Bekasi</h2>
+              <h3 className="text-sm font-bold tracking-wide uppercase">Kecamatan Cibitung • Desa Muktiwari</h3>
+              <h4 className="text-lg font-black text-emerald-800 uppercase mt-1">Rukun Tetangga 003 / Rukun Warga 037</h4>
+              <p className="text-[10px] text-slate-600 mt-0.5">Alamat: Perumahan GHP Smart Village RT 003 RW 037, Desa Muktiwari</p>
+            </div>
+
+            <div className="text-center space-y-1">
+              <h3 className="text-sm font-bold underline uppercase">{showPrintModal.type}</h3>
+              <p className="text-xs font-mono text-slate-600">Nomor: 003/SK-RT/{new Date().getFullYear()}/{Math.floor(1000 + Math.random() * 9000)}</p>
+            </div>
+
+            <div className="text-xs space-y-3 leading-relaxed">
+              <p>Yang bertanda tangan di bawah ini Ketua RT 003 RW 037 Desa Muktiwari, Kecamatan Cibitung, menerangkan bahwa:</p>
+              
+              <table className="w-full text-xs font-semibold space-y-1">
+                <tbody>
+                  <tr>
+                    <td className="w-32 py-1">Nama Lengkap</td>
+                    <td className="py-1">: <strong>{showPrintModal.applicantName}</strong></td>
+                  </tr>
+                  <tr>
+                    <td className="py-1">NIK KTP</td>
+                    <td className="py-1">: {showPrintModal.nik}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1">Alamat Domisili</td>
+                    <td className="py-1">: RT 003 / RW 037 ({showPrintModal.blockNumber})</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1">Keperluan / Catatan</td>
+                    <td className="py-1">: {showPrintModal.note}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <p>Demikian Surat Pengantar ini dibuat dengan sebenarnya untuk dipergunakan sebagaimana mestinya.</p>
+            </div>
+
+            <div className="flex justify-between items-end pt-8 text-xs text-center font-bold">
+              <div>
+                <p className="mb-12">Pemohon / Warga</p>
+                <p className="underline">{showPrintModal.applicantName}</p>
+              </div>
+              <div>
+                <p>Muktiwari, {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+                <p className="mb-12">Ketua RT 003 RW 037</p>
+                <p className="underline">H. Sulaeman</p>
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-slate-200 flex justify-end gap-2 print:hidden">
+              <button 
+                onClick={() => setShowPrintModal(null)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-xl text-xs"
+              >
+                Tutup Window
+              </button>
+              <button 
+                onClick={() => window.print()}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-md"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Cetak Dokumen PDF</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {}
+      {showSecurityModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 text-slate-100 max-w-lg w-full rounded-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-amber-400" />
+                <span>Arsitektur Realtime & Rule Database RT 003</span>
+              </h3>
+              <button onClick={() => setShowSecurityModal(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="text-xs space-y-3 text-slate-300 leading-relaxed font-mono bg-slate-950 p-4 rounded-xl border border-slate-800">
+              <p className="text-emerald-400 font-bold">// Rules Firestore Security RT 003 Muktiwari</p>
+              <p className="text-slate-400">rules_version = '2';</p>
+              <p className="text-slate-400">service cloud.firestore {'{'}</p>
+              <p className="pl-4 text-slate-400">match /databases/{'{database}'}/documents {'{'}</p>
+              <p className="pl-8 text-amber-300">// Publik Warga & Pengurus Realtime Data</p>
+              <p className="pl-8 text-slate-300">match /artifacts/{'{appId}'}/public/data/{'{document=**}'} {'{'}</p>
+              <p className="pl-12 text-emerald-300">allow read, write: if true;</p>
+              <p className="pl-8 text-slate-300">{'}'}</p>
+              <p className="pl-4 text-slate-400">{'}'}</p>
+              <p className="text-slate-400">{'}'}</p>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed">
+              *Data kependudukan, kas, pengumuman, dan agenda tersimpan secara permanen pada Firestore Cloud Database dan terhubung langsung secara realtime dengan seluruh perangkat warga & pengurus RT 003 RW 037 Muktiwari.
+            </p>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                onClick={() => setShowSecurityModal(false)}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs"
+              >
+                Mengerti & Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {}
+      {showLogoutModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 text-slate-100 max-w-sm w-full rounded-2xl p-6 space-y-5 text-center shadow-2xl">
+            <div className="w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-400 flex items-center justify-center mx-auto">
+              <LogOut className="w-7 h-7" />
+            </div>
+
+            <div>
+              <h3 className="font-bold text-white text-base">Konfirmasi Keluar</h3>
+              <p className="text-xs text-slate-300 mt-2">Apakah Anda yakin ingin keluar dari akun Anda?</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                onClick={() => setShowLogoutModal(false)}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs transition-all"
+              >
+                Tidak
+              </button>
+              <button
+                onClick={confirmLogout}
+                className="px-4 py-2.5 bg-rose-500 hover:bg-rose-600 text-white font-bold rounded-xl text-xs transition-all shadow-md shadow-rose-500/20"
+              >
+                Ya, Keluar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
